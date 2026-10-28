@@ -150,7 +150,7 @@ LinuxCamera/
 - `third_party/inih/`：第三方 ini 解析器，不要修改；
 - `build-arm/`、`stage/`：本地生成物。
 
-建议 `.gitignore`：
+ `.gitignore`：
 
 ```gitignore
 build*/
@@ -211,7 +211,7 @@ sudo apt install v4l-utils
 set(SDK_ROOT "/home/book/100ask_imx6ull-sdk/ToolChain/arm-buildroot-linux-gnueabihf_sdk-buildroot")
 ```
 
-是我服务器的 SDK 路径。
+这是我服务器上的 SDK 路径。
 
 ### 2. 本机构建（用于 config/log 测试）
 
