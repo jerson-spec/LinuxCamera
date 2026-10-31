@@ -46,7 +46,7 @@ target_link_libraries(camera PRIVATE
     camera_core
 )
 
-# ---------- 现有 V4L2 测试 ----------
+# ---------- V4L2 测试 ----------
 add_executable(test_Get_images
     V4L2/test_Get_images.c
 )
@@ -57,6 +57,19 @@ target_compile_options(test_Get_images PRIVATE
 target_link_libraries(test_Get_images PRIVATE
     camera_core
 )
+
+# --------- lcd 测试 -----------
+add_executable(test_Draw_region
+    LCD/test_Draw_region.c
+)
+target_compile_options(test_Draw_region PRIVATE
+    -Wall -Wextra
+)
+
+target_link_libraries(test_Draw_region PRIVATE
+    camera_core
+)
+
 
 # ---------- 配置模块的独立测试 ----------
 add_executable(config_test
@@ -72,4 +85,7 @@ install(TARGETS camera
 )
 install(FILES config/camera.ini
     DESTINATION etc/camera
+)
+install(FILES config/lcd.ini
+	DESTINATION etc/lcd
 )

@@ -180,7 +180,7 @@ int main(int argc,char** argv)
 				fsenum.index = j;
 				
 				if(ioctl(fd, VIDIOC_ENUM_FRAMESIZES, &fsenum) == 0) {
-					if(fsenum.type == V4L2_FRMIVAL_TYPE_DISCRETE)
+					if(fsenum.type == V4L2_FRMSIZE_TYPE_DISCRETE)
 					{
 						printf("format:%s,%d , support frame size: %d x %d\n",\
 						fmtdesc.description,fsenum.pixel_format,fsenum.discrete.width,fsenum.discrete.height);
