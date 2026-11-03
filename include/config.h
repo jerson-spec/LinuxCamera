@@ -19,6 +19,9 @@ typedef struct {
 	char lcd_log_level[16];
 	char lcd_log_file[256];
 	int lcd_display_time;
+
+	char trans_range[16];
+	int trans_display_time;
 } app_config_t;
 
 int  config_load(const char *path, app_config_t *cfg);

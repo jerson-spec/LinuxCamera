@@ -55,6 +55,70 @@ int lcd_put_pixel(unsigned int x, unsigned int y , unsigned int color)
 	return 0;
 }
 
+#if 1 
+int Get_lcd_parameters(struct fb_fix_screeninfo *lcd_fix_screeninfo_p,struct fb_var_screeninfo *lcd_var_screeninfo_p)
+{
+	int fd;
+	unsigned int fb_size;
+
+	/* 解析配置项并打印 */
+	app_config_t cfg;
+	char *path =  "config/lcd.ini";
+	
+	if(config_load(path, &cfg) < 0 )
+	{
+		fprintf(stderr,"can't load the config: %s\n",path);
+		return -1;
+	}
+
+	/* 打开设备 */	
+	fd = open(cfg.lcd_device , O_RDWR);
+	if(fd < 0)
+	{
+		//LOG_ERROR("open error\n");
+		perror("open");
+		return -1;
+	}
+
+	/* 获取lCD信息 */
+	/* fix */
+	if(ioctl(fd , FBIOGET_FSCREENINFO ,&lcd_fix_screeninfo_t) < 0)
+	{	
+		//LOG_ERROR("ioctl lcd fix error\n");
+		perror("ioctl lcd fix");
+		return -1;
+	}
+	/* var */
+	if(ioctl(fd , FBIOGET_VSCREENINFO ,&lcd_var_screeninfo_t) < 0)
+	{
+		//LOG_ERROR("ioctl lcd var error\n");
+		perror("ioctl lcd var");
+		return -1;
+	}
+
+	/* mmap映射 */
+	fb_size = lcd_fix_screeninfo_t.smem_len;
+	mem_addr = mmap(NULL, fb_size, PROT_READ | PROT_WRITE, MAP_SHARED , fd, 0);
+	if(mem_addr == MAP_FAILED )
+	{		
+		//LOG_ERROR("mmap error\n");
+		perror("mmap");
+		return -1;
+	}
+	memset(mem_addr , 0 ,fb_size);
+
+	
+	if (lcd_fix_screeninfo_p != NULL) {
+        *lcd_fix_screeninfo_p = lcd_fix_screeninfo_t;   
+    }
+    if (lcd_var_screeninfo_p != NULL) {
+        *lcd_var_screeninfo_p = lcd_var_screeninfo_t;
+    }
+	
+	return fd;
+}
+
+#else
 /*
 *  ./test_Draw_region
 */
@@ -205,3 +269,4 @@ int main(int argc,char**argv)
 	
 	return 0;
 }
+#endif

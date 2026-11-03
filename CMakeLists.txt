@@ -59,7 +59,7 @@ target_link_libraries(test_Get_images PRIVATE
 )
 
 # --------- lcd 测试 -----------
-add_executable(test_Draw_region
+add_library(test_Draw_region
     LCD/test_Draw_region.c
 )
 target_compile_options(test_Draw_region PRIVATE
@@ -70,6 +70,22 @@ target_link_libraries(test_Draw_region PRIVATE
     camera_core
 )
 
+target_include_directories(test_Draw_region PUBLIC
+    LCD/include
+)
+
+# ---------- YUYV Trans 测试 ----------
+add_executable(test_Trans_YUYV
+    Trans/test_Trans_YUYV.c
+)
+target_compile_options(test_Trans_YUYV PRIVATE
+    -Wall -Wextra
+)
+
+target_link_libraries(test_Trans_YUYV PRIVATE
+    test_Draw_region
+    camera_core
+)
 
 # ---------- 配置模块的独立测试 ----------
 add_executable(config_test
@@ -89,3 +105,7 @@ install(FILES config/camera.ini
 install(FILES config/lcd.ini
 	DESTINATION etc/lcd
 )
+install(FILES config/trans.ini
+	DESTINATION etc/trans
+)
+

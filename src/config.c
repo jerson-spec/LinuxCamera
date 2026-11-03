@@ -89,7 +89,12 @@ static int on_key(void *user, const char *section,
 		if (!strcmp(name, "log_file"))
             return copy_str(c->lcd_log_file, sizeof(c->lcd_log_file), value);		
 	  }
-	  
+	  else if (!strcmp(section, "trans")) {
+        if (!strcmp(name, "range"))
+            return copy_str(c->trans_range, sizeof(c->trans_range), value);
+		 if (!strcmp(name, "trans_display_time"))
+			 return parse_int(value, 0, 1000, &c->trans_display_time);
+	  }
 
     fprintf(stderr, "config: unknown key [%s] %s\n", section, name);
     return 1;
@@ -116,6 +121,9 @@ static void set_defaults(app_config_t *c)
 	c->lcd_display_time  = 10;
 	snprintf(c->lcd_log_level ,sizeof(c->lcd_log_level),"%s","DEBUG");	
 	snprintf(c->lcd_log_file  ,sizeof(c->lcd_log_file), "%s","./lcd.log");
+
+	snprintf(c->trans_range  ,sizeof(c->trans_range), "%s","FULL");
+	c->trans_display_time = 100;
 }
 
 int config_load(const char *path, app_config_t *c)
@@ -144,7 +152,8 @@ int config_load(const char *path, app_config_t *c)
         c->save_count < 0 || ((c->flag != 0) && (c->flag != 1)) ||
         c->log_file[0] == '\0' || c->log_level[0] == '\0' || c->lcd_device[0] == '\0' || 
         c->lcd_display_size <= 0 || c->lcd_display_size >= 10 || c->lcd_log_file[0] == '\0' ||
-        c->lcd_log_level[0] == '\0' || c->lcd_display_time < 0 || c->lcd_display_time > 100){
+        c->lcd_log_level[0] == '\0' || c->lcd_display_time < 0 || c->lcd_display_time > 100 ||
+        c->trans_range[0]  == '\0' || c->trans_display_time < 0 || c->trans_display_time > 1000){
         fprintf(stderr, "config: invalid values\n");
         return -1;
     }
@@ -174,6 +183,8 @@ void config_print(const app_config_t *c)
 
 	printf("lcd_log_level  = %s\n",c->lcd_log_level);
 	printf("lcd_log_file   = %s\n",c->lcd_log_file);
-	
+
+	printf("trans_range    = %s\n",c->trans_range);
+	printf("trans_display_time = %d\n",c->trans_display_time);
 }
 
