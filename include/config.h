@@ -1,5 +1,5 @@
-#ifndef CAMERA_CONFIG_H
-#define CAMERA_CONFIG_H
+#ifndef _CONFIG_H
+#define _CONFIG_H
 
 typedef struct {
     char device[64];

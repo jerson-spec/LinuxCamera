@@ -21,6 +21,8 @@ target_include_directories(inih PUBLIC
 add_library(camera_core STATIC
     src/config.c
     src/log.c
+    src/lcd.c
+    src/yuyv.c
 )
 target_include_directories(camera_core PUBLIC
     include
@@ -48,7 +50,7 @@ target_link_libraries(camera PRIVATE
 
 # ---------- V4L2 测试 ----------
 add_executable(test_Get_images
-    V4L2/test_Get_images.c
+    tests/manual/test_Get_images.c
 )
 target_compile_options(test_Get_images PRIVATE
     -Wall -Wextra
@@ -59,8 +61,8 @@ target_link_libraries(test_Get_images PRIVATE
 )
 
 # --------- lcd 测试 -----------
-add_library(test_Draw_region
-    LCD/test_Draw_region.c
+add_executable(test_Draw_region
+     tests/manual/test_Draw_region.c
 )
 target_compile_options(test_Draw_region PRIVATE
     -Wall -Wextra
@@ -70,26 +72,21 @@ target_link_libraries(test_Draw_region PRIVATE
     camera_core
 )
 
-target_include_directories(test_Draw_region PUBLIC
-    LCD/include
-)
-
 # ---------- YUYV Trans 测试 ----------
 add_executable(test_Trans_YUYV
-    Trans/test_Trans_YUYV.c
+    tests/manual/test_Trans_YUYV.c
 )
 target_compile_options(test_Trans_YUYV PRIVATE
     -Wall -Wextra
 )
 
 target_link_libraries(test_Trans_YUYV PRIVATE
-    test_Draw_region
     camera_core
 )
 
 # ---------- 配置模块的独立测试 ----------
 add_executable(config_test
-    tests/config_test.c
+    tests/unit/config_test.c
 )
 target_link_libraries(config_test PRIVATE
     camera_core
