@@ -2,6 +2,7 @@
 #define _LCD_H_
 
 #include <linux/fb.h>
+#include "config.h"
 
 int lcd_init(char* lcd_cfg_path , app_config_t *lcd_cfg_p);
 int lcd_deinit(void);

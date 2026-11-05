@@ -9,6 +9,7 @@ BINARIES=(
     test_Get_images
     test_Draw_region
     test_Trans_YUYV
+    test_camera_preview
 )
 
 adb get-state >/dev/null

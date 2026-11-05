@@ -81,7 +81,7 @@ static int on_key(void *user, const char *section,
 		if (!strcmp(name, "display_size"))
             return parse_int(value, 0, 10 , &c->lcd_display_size);
 		if (!strcmp(name, "display_time"))
-            return parse_int(value, 0, 100 , &c->lcd_display_time);
+            return parse_int(value, 0, 1000 , &c->lcd_display_time);
 	  }
 	  else if (!strcmp(section, "lcd_log")) {
         if (!strcmp(name, "log_level"))
@@ -118,7 +118,7 @@ static void set_defaults(app_config_t *c)
 	snprintf(c->lcd_device ,sizeof(c->lcd_device),"%s","/dev/fb0");
 	c->lcd_color = 0xffff0000;
 	c->lcd_display_size  = 1;
-	c->lcd_display_time  = 10;
+	c->lcd_display_time  = 100;
 	snprintf(c->lcd_log_level ,sizeof(c->lcd_log_level),"%s","DEBUG");	
 	snprintf(c->lcd_log_file  ,sizeof(c->lcd_log_file), "%s","./lcd.log");
 
@@ -152,7 +152,7 @@ int config_load(const char *path, app_config_t *c)
         c->save_count < 0 || ((c->flag != 0) && (c->flag != 1)) ||
         c->log_file[0] == '\0' || c->log_level[0] == '\0' || c->lcd_device[0] == '\0' || 
         c->lcd_display_size <= 0 || c->lcd_display_size >= 10 || c->lcd_log_file[0] == '\0' ||
-        c->lcd_log_level[0] == '\0' || c->lcd_display_time < 0 || c->lcd_display_time > 100 ||
+        c->lcd_log_level[0] == '\0' || c->lcd_display_time < 0 || c->lcd_display_time > 1000 ||
         c->trans_range[0]  == '\0' || c->trans_display_time < 0 || c->trans_display_time > 1000){
         fprintf(stderr, "config: invalid values\n");
         return -1;

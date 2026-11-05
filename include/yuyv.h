@@ -1,6 +1,8 @@
 #ifndef _YUYV_H_
 #define _YUYV_H_
 
+#include "config.h"
+
 /*
 *	rgb结构体
 */

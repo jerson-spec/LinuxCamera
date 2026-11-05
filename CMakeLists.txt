@@ -84,7 +84,19 @@ target_link_libraries(test_Trans_YUYV PRIVATE
     camera_core
 )
 
-# ---------- 配置模块的独立测试 ----------
+# --------- camera preview 测试 -----------
+add_executable(test_camera_preview
+    tests/manual/test_camera_preview.c
+)
+target_compile_options(test_camera_preview PRIVATE
+    -Wall -Wextra
+)
+
+target_link_libraries(test_camera_preview PRIVATE
+    camera_core
+)
+
+# --------- 配置模块的独立测试 -----------
 add_executable(config_test
     tests/unit/config_test.c
 )

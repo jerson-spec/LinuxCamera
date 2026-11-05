@@ -1,2 +1,10 @@
 build*/
 stage/
+
+# 运行产物
+*.log
+images/
+*.jpg
+*.yuyv
+*.yuv
+*.raw

@@ -8,52 +8,68 @@
 ## 1. 当前阶段
 
 ```text
-W0 工程底座        ✅ 基本完成
-W1 最小闭环        🟡 完成大半：LCD 能画、YUYV 能转，但摄像头帧还没上屏
-v0.1               ❌ 尚未完成
-v0.5 / v1.0        ❌ 未开始
+W0 工程底座        ✅ 完成
+W1 最小闭环        ✅ 完成（摄像头 YUYV 单帧 → LCD）
+v0.1               ✅ 功能完成（800×600 左上角显示）
+v0.5 连续预览      ❌ 下一步
+v1.0               ❌ 未开始
 ```
 
 当前状态一句话：
 
-> **V4L2 采集、配置、日志、LCD、YUYV 转换都已经分段跑通，下一步是把摄像头 YUYV 帧直接送到 LCD。**
+> **摄像头 YUYV 单帧已经能显示到 LCD；下一步是连续预览、双缓冲和 FPS。**
 
-当前适合的标签：
+当前功能对应：
 
 ```text
-lcd-yuyv-milestone
+v0.1 camera preview
+```
+
+建议标签：
+
+```text
+v0.1
 ```
 
 或：
 
 ```text
-v0.1.0-alpha
+v0.1-camera-preview
 ```
-
-**不要打 `v1.0`。**
 
 ---
 
-## 2. 版本定义
+## 2. 当前已知事实
 
-### v0.1 最小闭环
+- 摄像头请求 1024×600，实际返回 **800×600 YUYV**；
+- `bytesperline = 1600 = 800 × 2`；
+- LCD 为 **1024×600**；
+- 画面显示在左上角 800×600，右侧 224 像素黑色；
+- 黑边是分辨率/宽高比不匹配，不是 bug；
+- 单帧预览由 `lcd.ini` 的 `display_time` 决定保持时间；
+- 当前没有连续循环。
+
+---
+
+## 3. 版本定义
+
+### v0.1 最小闭环（已完成）
 
 目标：
 
 - 抓 1 帧 YUYV；
-- 转 RGB565；
-- 写满 LCD；
-- 屏幕上出现摄像头画面。
+- 转 RGB；
+- 写 LCD；
+- 屏幕出现摄像头画面。
 
 验收：
 
-- [ ] `test_camera_preview` 能显示一帧真实摄像头画面；
-- [ ] 正确处理 `bytesperline`；
-- [ ] 摄像头分辨率 ≤ LCD 分辨率时 1:1 显示；
-- [ ] 程序正常退出，无段错误；
-- [ ] 有日志打印实际格式、分辨率、stride。
-
-预计：1–2 天。
+- [x] 摄像头 YUYV 采集；
+- [x] YUYV → RGB；
+- [x] LCD 单帧显示；
+- [x] 实际 800×600，1:1 左上角显示；
+- [x] 程序正常退出，无段错误；
+- [ ] 提交并打标签。
 
 ### v0.5 连续预览
 
@@ -67,10 +83,11 @@ v0.1.0-alpha
 验收：
 
 - [ ] 连续运行 10 分钟；
-- [ ] FPS 稳定；
+- [ ] FPS 稳定并可打印；
 - [ ] 无内存增长；
-- [ ] Ctrl-C 能干净退出；
-- [ ] 日志能看到 FPS/耗时。
+- [ ] Ctrl-C 干净退出；
+- [ ] 日志能看到 capture/convert/display 耗时；
+- [ ] 采集线程不因 LCD 慢而卡死。
 
 预计：1 周。
 
@@ -113,9 +130,9 @@ v0.1.0-alpha
 
 ---
 
-## 3. 对照 12 周计划
+## 4. 对照 12 周计划
 
-原计划来自：
+原计划文件：
 
 ```text
 D:\Desktop\deepseek_harness_project\嵌入式Linux学习规划-相机主线.md
@@ -125,98 +142,126 @@ D:\Desktop\deepseek_harness_project\嵌入式Linux学习规划-相机主线.md
 
 | 周 | 计划 | 当前状态 |
 |---|---|---|
-| W0 | CMake、log、ini、gdbserver、Git | ✅ 基本完成 |
-| W1 | 一帧 YUYV → RGB565 → fb0 | 🟡 LCD/YUYV 已通，摄像头帧未上屏 |
-| W2 | 连续采集、FPS | ❌ 未开始 |
+| W0 | CMake、log、ini、gdbserver、Git | ✅ 完成 |
+| W1 | 一帧 YUYV → RGB565 → fb0 | ✅ 完成（800×600 1:1） |
+| W2 | 连续采集、FPS | ❌ 下一步 |
 | W3 | 查表、letterbox、多分辨率 | ❌ 未开始 |
 | W4 | 触摸/UI/OSD | ❌ 未开始 |
-| W5 | libjpeg、存卡 | 🟡 MJPEG 直接保存已通，完整存卡未做 |
+| W5 | libjpeg、存卡 | 🟡 MJPEG 直接保存已通 |
 | W6 | HTTP MJPEG | ❌ 未开始 |
-| W7 | 重构/测试/文档 | 🟡 目录已整理，测试/文档未完成 |
+| W7 | 重构/测试/文档 | 🟡 文档已补，测试未做 |
 | W8–W9 | I2C/Input 驱动 | ❌ 未开始 |
-| W10 | V4L2 深入 | 🟡 枚举/格式有一定实践 |
+| W10 | V4L2 深入 | 🟡 枚举/格式有实践 |
 | W11 | Buildroot/自启/看门狗 | ❌ 未开始 |
-| W12 | 性能/README/演示 | 🟡 README 已有，性能和演示未做 |
+| W12 | 性能/README/演示 | 🟡 README 已更新 |
 
 结论：
 
-> **当前处于 W0 完成、W1 进行中。主线没有偏，但 v0.1 的“摄像头画面”必须尽快完成。**
+> **W0、W1 完成；下一步 W2：连续采集 + FPS。**
 
 ---
 
-## 4. 接下来两周
+## 5. 下一步：v0.5 连续预览
 
-### 第 1 天：收尾当前阶段
+### 第 1 步：单缓冲连续循环
 
-- [ ] 更新 README（当前状态、目录、运行方式）；
-- [ ] 提交当前可用版本；
-- [ ] 打 `lcd-yuyv-milestone` 标签；
-- [ ] 记录 LCD/YUYV 调试经验到 `docs/debug-log.md`。
+在 `test_camera_preview.c` 基础上：
 
-### 第 2 天：整理模块
+```text
+while (running) {
+    poll(timeout);
+    DQBUF;
+    yuyv_to_rgb;
+    QBUF;
+    display;
+    fps;
+}
+```
 
-- [ ] 把 `lcd.c/h` 中不合理的全局状态/生命周期问题记下来，不急着大改；
-- [ ] 给 `yuyv_to_rgb()` 增加 `src_stride` 参数；
-- [ ] 把 `generate_yuyv_region()` 移到 `tests/manual/` 或测试文件；
-- [ ] 让 `include/lcd.h`、`include/yuyv.h` 自包含（include `config.h` 或前向声明）。
+要求：
 
-### 第 3–4 天：单帧摄像头预览
+- `QBUF` 尽早；
+- `poll` 超时；
+- Ctrl-C 退出；
+- 每秒打印 FPS/耗时；
+- 先接受撕裂。
 
-- [ ] 新建/实现 `tests/manual/test_camera_preview.c`；
-- [ ] `S_FMT` 设置为 YUYV；
-- [ ] 读回实际 `width/height/bytesperline/pixelformat`；
-- [ ] `REQBUFS`、`mmap`、`QBUF`、`STREAMON`；
-- [ ] `poll` + `DQBUF` 一帧；
-- [ ] `yuyv_to_rgb()`；
-- [ ] `lcd_put_pixel()` 显示；
-- [ ] `QBUF`、`STREAMOFF`、`munmap`、`close`。
+### 第 2 步：测性能
 
-验收：
+记录：
 
-- [ ] 屏幕上出现真实摄像头画面；
-- [ ] 颜色基本正确；
-- [ ] 无段错误；
-- [ ] 日志打印实际参数。
+```text
+fps
+capture_ms
+convert_ms
+display_ms
+```
 
-### 第 5–7 天：连续预览
+如果 FPS 低：
 
-- [ ] 循环 DQBUF/QBUF；
-- [ ] FPS 统计；
-- [ ] `poll` 超时；
-- [ ] Ctrl-C 退出；
-- [ ] 连续 10 分钟不崩。
+- 把浮点 YUV 转整数/查表；
+- 不再逐像素 `lcd_put_pixel()`；
+- 直接写 RGB565，按行处理；
+- 减少一次 memcpy。
 
-### 第 2 周：v0.5 双缓冲
+### 第 3 步：双缓冲
 
-- [ ] 双缓冲；
-- [ ] `FBIOPAN_DISPLAY`；
-- [ ] letterbox 预留；
-- [ ] 性能日志；
-- [ ] 代码从测试程序抽到 `src/camera.c` / `src/display.c`。
+- `yres_virtual = 2 * yres`；
+- 两个显示 buffer；
+- `FBIOPAN_DISPLAY`；
+- 写后台 buffer，显示前台；
+- 观察撕裂是否消失。
+
+### 第 4 步：10 分钟稳定性
+
+- 连续运行 10 分钟；
+- 记录 FPS 波动；
+- 检查 `/proc/<pid>/status` 的 VmRSS；
+- Ctrl-C 清理。
+
+### v0.5 验收
+
+- [ ] 10 分钟不崩；
+- [ ] FPS 可打印；
+- [ ] 无内存增长；
+- [ ] Ctrl-C 干净退出；
+- [ ] 双缓冲可用。
 
 ---
 
-## 5. 风险
+## 6. v1.0 方向
+
+- letterbox / 缩放；
+- 多分辨率；
+- 触摸/按键拍照；
+- libjpeg 编码；
+- 文件命名/容量检查；
+- OSD；
+- 8 小时稳定。
+
+---
+
+## 7. 风险
 
 | 风险 | 影响 | 对策 |
 |---|---|---|
-| `bytesperline` 与 `width*2` 不一致 | 画面斜/花 | 先打印 stride，转换函数加参数 |
-| 摄像头分辨率 > LCD | 越界/崩溃 | 先选 ≤ LCD 的分辨率 |
-| `lcd_put_pixel` 太慢 | FPS 低 | 单帧先验证，再直接写 RGB565 行 |
-| 全局 `full` 状态 | 忘记调用导致转换失败 | 改成参数或显式初始化 |
+| 逐像素显示太慢 | FPS 低 | 直接写 RGB565，按行处理 |
+| 单缓冲撕裂 | 观感差 | 双缓冲 + FBIOPAN_DISPLAY |
+| `bytesperline` 不匹配 | 画面斜 | 加 stride 参数 |
+| 摄像头分辨率 < LCD | 黑边 | 1:1 接受，v1.0 做 letterbox |
 | 配置结构膨胀 | 维护困难 | v0.5 后再拆 |
-| 继续加测试程序不抽模块 | 目录失控 | 先完成 v0.1，再重构 |
-| 提前做触摸/OSD/网络 | 主线延迟 | 先出画面 |
+| 继续加测试程序 | 目录失控 | 先 v0.5，再抽 camera/display 模块 |
+| 提前做触摸/OSD/网络 | 主线延迟 | 先连续预览 |
 
 ---
 
-## 6. 版本标签规则
+## 8. 版本标签规则
 
 - 只有达到版本验收，才打版本标签；
-- 当前最多打：
-  - `lcd-yuyv-milestone`
-  - `v0.1.0-alpha`
-- 不要在 v0.1 之前打 `v1.0`；
+- 当前可以打：
+  - `v0.1`
+  - `v0.1-camera-preview`
+- 不要在 v0.5 之前打 `v1.0`；
 - 每个标签附：
   - 能演示什么；
   - 不能做什么；
@@ -225,6 +270,6 @@ D:\Desktop\deepseek_harness_project\嵌入式Linux学习规划-相机主线.md
 
 ---
 
-## 7. 一句话
+## 9. 一句话
 
-> **先让摄像头画面出现在 LCD 上（v0.1），再谈连续、双缓冲和性能。**
+> **v0.1 已经完成；下一步不是继续修黑边，而是让画面连续动起来。**

@@ -13,10 +13,10 @@
 #include <string.h>
 #include <poll.h>
 #include <errno.h>
+#include <strings.h>
 
 #include "config.h"
 #include "log.h"
-#include <strings.h>
 
 
 //#define buffer_cnt 4
@@ -31,7 +31,7 @@ static unsigned int pixfmt_from_string(const char *s)
 }
 
 /*
-*	./test_Get_images
+*	./test_Get_images [ini path/camera.ini]
 */
 int main(int argc,char** argv)
 {
@@ -301,7 +301,7 @@ int main(int argc,char** argv)
 			    }		
 
 				/* 输出图片 */
-				sprintf(filename,"%s/image%02d.jpg",cfg.save_dir,j);	
+				sprintf(filename,"%s/image%02d.%s",cfg.save_dir,j,cfg.format);	
 				
 				file_fd = open(filename , O_RDWR | O_CREAT | O_TRUNC, 0666);
 				if(file_fd < 0)

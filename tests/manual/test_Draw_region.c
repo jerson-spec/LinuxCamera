@@ -3,7 +3,6 @@
 #include <string.h>
 
 #include "log.h"
-#include "config.h"
 #include "lcd.h"
 
 struct fb_fix_screeninfo lcd_fix_screeninfo;

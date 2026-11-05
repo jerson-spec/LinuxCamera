@@ -1,14 +1,15 @@
 # 项目交接（Handoff）
 
 > **新会话请先读本文。**
-> 读完后再看：
+> 然后再读：
 > - `docs/architecture.md`
 > - `docs/board.md`
 > - `docs/roadmap.md`
 > - `docs/debug-log.md`
+> - `docs/performance.md`
 > - `README.md`
 >
-> 本文目标是：让新的模型/新的你，在不看旧对话的情况下，快速知道
+> 本文目标：让新的模型/新的你，在不看旧对话的情况下，快速知道
 > **项目是什么、做到哪、怎么构建、怎么上板、下一步做什么、有哪些坑。**
 
 ---
@@ -18,20 +19,25 @@
 | 项目 | 当前值 |
 |---|---|
 | 项目 | i.MX6ULL Linux 相机 |
-| 当前阶段 | **pre-v0.1：LCD/YUYV 已分段跑通，摄像头帧尚未上屏** |
+| 当前阶段 | **v0.1 Camera Preview 已完成** |
 | 语言 | C |
 | 采集 | V4L2 MMAP |
 | 显示 | `/dev/fb0` framebuffer |
-| 摄像头 | `/dev/video1`，MJPEG 已验证 |
-| LCD | `/dev/fb0`，实际分辨率用 `fbset -i` 确认 |
+| 摄像头 | `/dev/video1` |
+| 摄像头请求 | 1024×600 YUYV |
+| 摄像头实际 | **800×600 YUYV**（驱动调整） |
+| `bytesperline` | **1600 = 800×2** |
+| LCD | **1024×600** |
+| 显示结果 | 左上角 800×600，右侧 224 像素黑色 |
 | 工具链 | 100ask Buildroot SDK |
-| 连接 | ADB，当前没有配置板子 IP |
-| 当前标签 | `lcd-yuyv-milestone`（建议） |
-| 当前不是 | v0.1、v0.5、v1.0 |
+| 连接 | ADB，无板子 IP |
+| 当前标签建议 | `v0.1` / `v0.1-camera-preview` |
+| 下一步 | **v0.5 连续预览 + 双缓冲 + FPS** |
+| 当前不是 | v0.5、v1.0 |
 
 一句话：
 
-> **采集、配置、日志、LCD、YUYV 转换都各自跑通了；下一步是把摄像头 YUYV 帧直接送到 LCD，完成 v0.1。**
+> **摄像头 YUYV 单帧已经能显示到 LCD；下一步是连续预览。右侧黑边是分辨率不匹配，不是 bug。**
 
 ---
 
@@ -86,16 +92,11 @@ V4L2 采集 → YUYV/RGB 转换 → LCD 显示 → 拍照存卡 → 网络推流
 - 6ULL 上预览用 YUYV，拍照用 MJPEG；
 - 先 framebuffer，不直接上 DRM；
 - 不做 Qt/LVGL/MQTT/RTSP，先把数据通路打通；
-- 分辨率先 ≤ 800×480；
+- 分辨率先 ≤ 800×480/800×600；
 - 6ULL 无 GPU/VPU，后续可考虑 PXP；
 - 先单摄像头；
-- 核心数据通路自己写，CMake/ini/log 可以借鉴模板。
-
-### 1.5 AI 协作原则
-
-- 用户希望先自己写，AI 做 review，不直接代写核心数据通路；
-- CMake/ini/log 属于工具类，可以给模板；
-- 回答尽量结合当前代码和板子，不要只讲理论。
+- 核心数据通路自己写，CMake/ini/log 可以借鉴模板；
+- 用户希望 AI 做 review、解释和规划，不直接代写核心数据通路。
 
 ---
 
@@ -130,7 +131,7 @@ LinuxCamera/
 │   │   ├── test_Get_images.c
 │   │   ├── test_Draw_region.c
 │   │   ├── test_Trans_YUYV.c
-│   │   └── test_camera_preview.c   # 空文件，下一步
+│   │   └── test_camera_preview.c
 │   └── unit/
 │       └── config_test.c
 ├── third_party/
@@ -140,8 +141,9 @@ LinuxCamera/
 │   ├── board.md
 │   ├── roadmap.md
 │   ├── handoff.md
+│   ├── handoff-prompt.md
 │   ├── debug-log.md
-│   └── performance.md              # 目前为空
+│   └── performance.md
 ├── scripts/
 │   ├── build.sh
 │   ├── build_dbg.sh
@@ -163,14 +165,15 @@ LinuxCamera/
 - gdbserver + ADB 转发；
 - LCD framebuffer 打开/mmap/画像素；
 - YUYV → RGB（FULL/LIMIT）；
-- 合成 YUYV 色条上屏。
+- 合成 YUYV 色条上屏；
+- **摄像头 YUYV 单帧 → RGB → LCD（v0.1）**。
 
 ### 2.3 还没做的功能
 
-- **摄像头 YUYV 帧直接显示到 LCD**（当前最重要）；
 - 连续预览；
 - 双缓冲；
-- letterbox；
+- FPS；
+- letterbox/缩放；
 - 触摸/按键；
 - OSD；
 - libjpeg 拍照存卡；
@@ -178,16 +181,16 @@ LinuxCamera/
 - 8 小时稳定性；
 - 单元测试/CI。
 
-### 2.4 各测试程序
+### 2.4 各程序状态
 
 | 程序 | 状态 | 作用 |
 |---|---|---|
-| `test_Get_images` | ✅ 可跑 | 采集/枚举/保存 JPEG |
-| `test_Draw_region` | ✅ 可跑 | LCD 参数 + 区域绘制 |
-| `test_Trans_YUYV` | ✅ 可跑 | 合成 YUYV 色条 → RGB → LCD |
-| `config_test` | ✅ 可跑 | 配置读取/打印 |
-| `camera` | ✅ 可编译 | 当前只是配置检查占位，不是相机主程序 |
-| `test_camera_preview` | ❌ 空文件，未加入 CMake | 下一步实现摄像头单帧预览 |
+| `test_Get_images` | ✅ | 采集/枚举/保存 JPEG |
+| `test_Draw_region` | ✅ | LCD 参数 + 区域绘制 |
+| `test_Trans_YUYV` | ✅ | 合成 YUYV 色条 → RGB → LCD |
+| `test_camera_preview` | ✅ | 摄像头 YUYV 单帧 → LCD |
+| `config_test` | ✅ | 配置读取/打印 |
+| `camera` | ✅ 可编译 | 当前只是配置检查占位，不是正式主程序 |
 
 ---
 
@@ -198,10 +201,10 @@ LinuxCamera/
 - 100ask i.MX6ULL；
 - ARMv7 32-bit hard-float；
 - 摄像头 `/dev/video1`；
-- LCD `/dev/fb0`；
+- LCD `/dev/fb0`，1024×600；
 - 当前通过 ADB 连接，没有配置板子 IP。
 
-板子上确认：
+确认：
 
 ```bash
 uname -a
@@ -211,31 +214,25 @@ fbset -i
 v4l2-ctl -d /dev/video1 --list-formats-ext
 ```
 
-### 3.2 工具链
+### 3.2 摄像头实际分辨率
 
-`cmake/toolchain-arm.cmake` 当前指向：
+- 配置请求：1024×600；
+- 驱动实际：**800×600 YUYV**；
+- `bytesperline = 1600`；
+- 摄像头不支持 1024×600；
+- 所以右侧 224 像素黑色是正常的 1:1 显示。
 
-```text
-/home/book/100ask_imx6ull-sdk/ToolChain/arm-buildroot-linux-gnueabihf_sdk-buildroot
-```
+### 3.3 工具链
 
-编译器：
-
-```text
-bin/arm-buildroot-linux-gnueabihf-gcc
-```
-
-sysroot：
+`cmake/toolchain-arm.cmake`：
 
 ```text
-arm-buildroot-linux-gnueabihf/sysroot
+SDK_ROOT=/home/book/100ask_imx6ull-sdk/ToolChain/arm-buildroot-linux-gnueabihf_sdk-buildroot
+CC=${SDK_ROOT}/bin/arm-buildroot-linux-gnueabihf-gcc
+SYSROOT=${SDK_ROOT}/arm-buildroot-linux-gnueabihf/sysroot
 ```
 
-换机器/换 SDK 时先改这个文件。
-
-### 3.3 构建
-
-Release/Debug：
+### 3.4 构建
 
 ```bash
 cd ~/Desktop/LinuxCamera
@@ -251,39 +248,45 @@ cmake -S . -B build-arm-dbg \
 cmake --build build-arm-dbg -j"$(nproc)"
 ```
 
-检查：
+如果 RelWithDebInfo 出现配置异常，先 `rm -rf build-arm` 重编，排除旧对象/ABI。
 
-```bash
-file build-arm/test_Trans_YUYV
-grep CMAKE_C_COMPILER build-arm/CMakeCache.txt
-```
-
-### 3.4 部署
+### 3.5 部署
 
 ```bash
 adb devices
 adb shell mkdir -p /root/LinuxCamera/config
 
+adb push build-arm/test_camera_preview /root/LinuxCamera/
 adb push build-arm/test_Get_images /root/LinuxCamera/
-adb push build-arm/test_Draw_region /root/LinuxCamera/
 adb push build-arm/test_Trans_YUYV /root/LinuxCamera/
+adb push build-arm/test_Draw_region /root/LinuxCamera/
 
 adb push config/camera.ini /root/LinuxCamera/config/
 adb push config/lcd.ini /root/LinuxCamera/config/
 adb push config/trans.ini /root/LinuxCamera/config/
-
-adb shell
-cd /root/LinuxCamera
-chmod +x test_Get_images test_Draw_region test_Trans_YUYV
 ```
-
-### 3.5 GDB
 
 板子：
 
 ```bash
 cd /root/LinuxCamera
-gdbserver :1234 ./test_Trans_YUYV
+chmod +x test_camera_preview test_Get_images test_Trans_YUYV test_Draw_region
+```
+
+### 3.6 运行
+
+```bash
+./test_camera_preview
+```
+
+当前 `lcd.ini` 的 `display_time=300`，会保持 5 分钟；测试时改成 5 秒。
+
+### 3.7 GDB
+
+板子：
+
+```bash
+gdbserver :1234 ./test_camera_preview
 ```
 
 Ubuntu：
@@ -294,7 +297,7 @@ adb forward tcp:1234 tcp:1234
 GDB=$(find "$HOME/100ask_imx6ull-sdk/ToolChain/arm-buildroot-linux-gnueabihf_sdk-buildroot" \
       -type f -name '*-gdb' | head -n 1)
 
-"$GDB" build-arm-dbg/test_Trans_YUYV
+"$GDB" build-arm-dbg/test_camera_preview
 ```
 
 gdb：
@@ -310,17 +313,15 @@ c
 注意：
 
 - 远程调试不用 `r`，用 `c`；
-- 程序退出后 gdbserver 也结束；
-- `adb forward` 失效时重新执行；
-- 板子暂无 IP，走 ADB。
+- 程序退出后 gdbserver 结束；
+- 当前板子没有 IP，走 ADB；
+- `scripts/gdb.sh` 目前不完整，先用命令。
 
 ---
 
 ## 4. 当前代码架构
 
 ### 4.1 `camera_core`
-
-CMake：
 
 ```cmake
 add_library(camera_core STATIC
@@ -331,22 +332,24 @@ add_library(camera_core STATIC
 )
 ```
 
-它目前包含 Linux 专用的 `lcd.c`，所以整体是 Linux-only。
+包含 Linux 专用 `lcd.c`，整体是 Linux-only。
 
 ### 4.2 `config`
 
 - `app_config_t` 同时包含 camera/storage/log/lcd/lcd_log/trans；
-- 用 inih 解析；
+- inih 解析；
 - `config_load()` 返回 0/-1；
-- 当前配置结构偏大，先不要大改。
+- 当前 `camera.ini` 请求 1024×600，但实际 800×600。
 
 ### 4.3 `log`
 
-- `LOG_DEBUG/INFO/WARN/ERROR`；
+- DEBUG/INFO/WARN/ERROR；
 - 时间戳、文件/行号；
 - 终端 + 文件；
 - `errno` 保存/恢复；
-- 无轮转；单线程。
+- 无轮转；单线程；
+- `lcd_init()` 会重新初始化日志到 `lcd.log`；
+- `lcd_deinit()` 会关闭日志。
 
 ### 4.4 `lcd`
 
@@ -360,10 +363,12 @@ void Get_lcd_parameters(struct fb_fix_screeninfo *fix,
                         struct fb_var_screeninfo *var);
 ```
 
-- `lcd_init()` 读 lcd.ini、open `/dev/fb0`、ioctl、mmap；
-- `lcd_put_pixel()` 支持 16/32bpp；
-- 使用全局 `mem_addr` / `lcd_fix_screeninfo_t` / `lcd_var_screeninfo_t`；
-- `lcd_deinit()` 会 `log_close()`，日志和 LCD 生命周期耦合。
+- 读 lcd.ini；
+- open `/dev/fb0`；
+- ioctl fix/var；
+- mmap；
+- 16bpp RGB565 / 32bpp；
+- 全局 `mem_addr` / fix / var。
 
 ### 4.5 `yuyv`
 
@@ -380,11 +385,35 @@ unsigned char *generate_yuyv_region(int width, int height);
 
 关键点：
 
-- `Is_full_range()` 设置文件内 `static int full`；
-- 调用 `yuyv_to_rgb()` 前**必须先调用** `Is_full_range()`；
-- `yuyv_to_rgb()` 没有 `src_stride` 参数；
-- `generate_yuyv_region()` 是测试用，但暴露在生产头文件里；
-- 转换使用浮点，适合验证，不是最终性能实现。
+- 文件内 `static int full`；
+- 调用 `yuyv_to_rgb()` 前必须先 `Is_full_range()`；
+- 没有 `src_stride`；
+- 当前只支持 `bytesperline == width*2`；
+- 浮点转换，适合验证，不是最终性能实现。
+
+### 4.6 `test_camera_preview`
+
+流程：
+
+```text
+config_load(camera.ini)
+config_load(lcd.ini)
+log_init
+lcd_init
+open camera
+S_FMT YUYV
+检查 bytesperline / 实际分辨率
+REQBUFS / mmap / QBUF / STREAMON
+poll / DQBUF
+检查 bytesused
+yuyv_to_rgb
+lcd_put_pixel
+QBUF
+STREAMOFF / munmap
+lcd_deinit
+```
+
+当前是**单帧**，显示 `lcd_display_time` 秒后退出。
 
 ---
 
@@ -392,121 +421,98 @@ unsigned char *generate_yuyv_region(int width, int height);
 
 1. **LCD 段错误**
    - `Get_lcd_parameters()` 只取参数、没有 mmap；
-   - `lcd_put_pixel()` 写 `mem_addr == NULL`，第一次 `memcpy` 就段错误；
+   - `lcd_put_pixel()` 写 `mem_addr == NULL`；
    - 修复：在 `lcd_init()` 中 mmap。
 
 2. **颜色全白/异常**
-   - `clamp()` 原来是 `void`，只改局部变量，没有修改传入值；
+   - `clamp()` 原来是 `void`，只改局部变量；
    - 负值赋给 `unsigned char` 回绕成 255；
-   - 修复：`clamp(int *val)`，调用后生效。
+   - 修复：`clamp(int *val)`。
 
 3. **LIMIT 颜色异常**
-   - 红色系数 `1.159` 应为 `1.596`；
-   - 绿色 `-0.813*(V-128)` 的减号写成了加号；
-   - 修复后 FULL/LIMIT 色条都正常。
+   - `1.159` 应为 `1.596`；
+   - `-0.813*(V-128)` 的减号写成加号；
+   - 修复后 FULL/LIMIT 色条正常。
 
-4. **LCD 16bpp 写像素**
-   - 早期用 `unsigned int *` 写 16bpp，覆盖下一个像素；
+4. **16bpp 写像素**
+   - 早期用 32-bit 指针写 16bpp，覆盖下一个像素；
    - 修复：按 bpp 用 `uint16_t`/`uint32_t` + `memcpy`。
 
-5. **`test_Draw_region` 结构**
-   - 早期是测试文件兼库，`#if 1` 禁用 main；
-   - 已拆出 `src/lcd.c` / `include/lcd.h`；
-   - `test_Draw_region.c` 现在是手动测试程序。
+5. **摄像头画面绿/雪花**
+   - `camera.ini` 还是 `format=MJPG`，但预览按 YUYV 转；
+   - 改成 `format=YUYV` 后正常。
 
-6. **目录整理**
-   - 已从 `LCD/`、`Trans/` 迁到 `src/`、`include/`、`tests/manual/`；
-   - `test_camera_preview.c` 已创建但为空。
+6. **右侧黑边**
+   - 请求 1024×600，摄像头实际 800×600；
+   - `bytesperline=1600` 证明实际宽度 800；
+   - 不是 bug，1:1 显示；缩放/letterbox 留 v1.0。
+
+7. **RelWithDebInfo 配置异常**
+   - 怀疑旧 build 缓存/头文件 ABI 或配置 CRLF；
+   - 清 `build-arm` 重编；检查 `camera.ini` 字节。
 
 ---
 
-## 6. 当前最重要的任务：v0.1 摄像头单帧预览
+## 6. 当前最重要的任务：v0.5 连续预览
 
 ### 6.1 目标
 
-实现：
+```text
+while (running) {
+    poll(timeout);
+    DQBUF;
+    yuyv_to_rgb;
+    QBUF;
+    display;
+    fps;
+}
+```
+
+### 6.2 先做单缓冲
+
+- 连续循环；
+- `poll` 超时；
+- Ctrl-C 退出；
+- FPS 统计；
+- 接受撕裂。
+
+### 6.3 再做双缓冲
+
+- `yres_virtual = 2 * yres`；
+- 两个显示 buffer；
+- `FBIOPAN_DISPLAY`；
+- 写后台，显示前台。
+
+### 6.4 性能
+
+当前逐像素 `lcd_put_pixel()` + 浮点转换，800×600 会慢。  
+先测：
 
 ```text
-摄像头 YUYV → yuyv_to_rgb() → lcd_put_pixel() → LCD
+fps
+capture_ms
+convert_ms
+display_ms
 ```
 
-不做文件、不做缩放、不做连续预览。
+再优化：
 
-### 6.2 新建/实现
-
-```text
-tests/manual/test_camera_preview.c
-```
-
-需要在 `CMakeLists.txt` 加 target：
-
-```cmake
-add_executable(test_camera_preview
-    tests/manual/test_camera_preview.c
-)
-target_link_libraries(test_camera_preview PRIVATE camera_core)
-```
-
-### 6.3 流程
-
-```text
-config_load("config/camera.ini", &cfg)
-lcd_init("config/lcd.ini", &lcd_cfg)
-
-open(cfg.device)
-VIDIOC_QUERYCAP
-VIDIOC_S_FMT(YUYV, cfg.width, cfg.height)
-读回实际 width/height/bytesperline/pixelformat
-VIDIOC_REQBUFS
-QUERYBUF + mmap
-QBUF × N
-STREAMON
-
-poll
-DQBUF
-yuyv_to_rgb(mem[buf.index], rgb, actual_w, actual_h,
-            actual_bytesperline, FULL)
-逐像素 lcd_put_pixel()
-
-QBUF
-STREAMOFF
-munmap
-close
-lcd_deinit()
-```
-
-### 6.4 必须先解决
-
-- `yuyv_to_rgb()` 增加 `src_stride` 参数；
-- 调用 `Is_full_range()` 或改成显式 range 参数；
-- `S_FMT` 后读回实际格式；
-- `REQBUFS` 后用实际 `count`；
-- 摄像头分辨率 ≤ LCD 分辨率，否则先裁剪或换小分辨率；
-- 打印 `bytesperline`、`line_length`、bpp。
+- YUYV → RGB565 直接写；
+- 整数/查表；
+- 按行写；
+- 减少中间 RGB888 buffer。
 
 ### 6.5 验收
 
-- [ ] 屏幕出现真实摄像头画面；
-- [ ] 颜色基本正确；
-- [ ] 无段错误；
-- [ ] 程序能正常退出；
-- [ ] 日志打印实际参数；
-- [ ] 提交并打 `v0.1` 或 `v0.1-alpha` 标签。
+- [ ] 连续 10 分钟不崩；
+- [ ] FPS 可打印；
+- [ ] 无内存增长；
+- [ ] Ctrl-C 干净退出；
+- [ ] 双缓冲可用。
 
 ---
 
 ## 7. 后续路线
-
-### v0.1
-
-- 单帧 YUYV → LCD。
-
-### v0.5
-
-- 连续采集；
-- 双缓冲；
-- FPS；
-- 10 分钟不崩。
 
 ### v1.0
 
@@ -528,42 +534,57 @@ lcd_deinit()
 
 ## 8. 已知代码/结构问题
 
-不用一次修完，按优先级：
+按优先级：
 
-1. `test_camera_preview.c` 为空；
-2. `yuyv_to_rgb()` 没有 stride；
-3. `yuyv.c` 的全局 `full` 状态；
-4. `lcd.c` 全局状态 + `log_close()` 耦合；
-5. `include/lcd.h`、`include/yuyv.h` 不是自包含（依赖先 include `config.h`）；
-6. `app_config_t` 过大；
-7. `Get_lcd_parameters()` 名字和职责不完全一致；
-8. `test_Get_images` 对 YUYV 仍保存 `.jpg`；
-9. `scripts/` 当前不可直接执行；
-10. `docs/performance.md` 为空；
+1. 只有单帧，没有连续循环；
+2. 没有双缓冲；
+3. `lcd_put_pixel()` 逐像素，性能不足；
+4. `yuyv_to_rgb()` 没有 stride；
+5. `yuyv.c` 全局 `full`；
+6. `lcd.c` 全局状态 + 日志生命周期耦合；
+7. `test_Get_images` 对 YUYV 仍用 `.jpg`；
+8. `app_config_t` 过大；
+9. 配置路径分散；
+10. `scripts/` 不可直接执行；
 11. 无单元测试/CI；
-12. `README.md` 可能落后于代码，以 docs 为准。
+12. `README` 已更新，但以 docs 为准。
 
 ---
 
-## 9. 不要做的事
+## 9. `app_config_t` 决策
 
-- 不要在 v0.1 之前做触摸/OSD/网络；
+**当前不拆分。**
+
+理由：
+
+- 不是当前 bug 的原因；
+- 会同时改 config.c、所有测试、lcd/yuyv 接口；
+- v0.1 刚完成，先做 v0.5；
+- 等触摸/OSD/多分辨率需求明确后再拆。
+
+在 `docs/architecture.md` 已留 TODO。
+
+---
+
+## 10. 不要做的事
+
+- 不要在 v0.5 前做触摸/OSD/网络；
 - 不要继续把生产代码写进测试文件；
 - 不要为了“架构漂亮”大改 `config.c`；
 - 不要手工 `arm-...gcc` 编译；
 - 不要打 `v1.0` 标签；
-- 不要用 Windows MSVC 编 V4L2 代码；
-- 不要在摄像头帧未上屏前继续加新功能。
+- 不要用 Windows MSVC 编 V4L2；
+- 不要在未确认实际分辨率时假设 1024×600。
 
 ---
 
-## 10. 新会话开始检查清单
+## 11. 新会话开始检查清单
 
 1. 读本文；
 2. `git status` / `git log --oneline -5`；
-3. 看 `tests/manual/test_camera_preview.c` 是否仍为空；
-4. 看 `CMakeLists.txt` 是否已有 `test_camera_preview` target；
-5. 检查 `config/camera.ini` 的 `device/format/width/height/flag`；
+3. 确认 `test_camera_preview.c` 已实现；
+4. 确认 `config/camera.ini` 的 `format=YUYV`；
+5. 确认摄像头实际 800×600、LCD 1024×600；
 6. 构建：
 
 ```bash
@@ -573,12 +594,12 @@ cmake -S . -B build-arm \
 cmake --build build-arm -j"$(nproc)"
 ```
 
-7. 上板验证现有测试仍可跑；
-8. 再开始 v0.1。
+7. 上板验证现有程序；
+8. 再开始 v0.5。
 
 ---
 
-## 11. 命令速查
+## 12. 命令速查
 
 ```bash
 # 构建
@@ -586,23 +607,23 @@ cmake -S . -B build-arm -DCMAKE_TOOLCHAIN_FILE="$PWD/cmake/toolchain-arm.cmake" 
 cmake --build build-arm -j"$(nproc)"
 
 # 部署
-adb push build-arm/test_Trans_YUYV /root/LinuxCamera/
+adb push build-arm/test_camera_preview /root/LinuxCamera/
 adb push config/*.ini /root/LinuxCamera/config/
 
 # 运行
 adb shell
 cd /root/LinuxCamera
-./test_Trans_YUYV
+./test_camera_preview
 
 # gdb
-gdbserver :1234 ./test_Trans_YUYV
+gdbserver :1234 ./test_camera_preview
 adb forward tcp:1234 tcp:1234
-"$GDB" build-arm-dbg/test_Trans_YUYV
+"$GDB" build-arm-dbg/test_camera_preview
 ```
 
 ---
 
-## 12. 文档索引
+## 13. 文档索引
 
 | 文档 | 内容 |
 |---|---|
@@ -610,12 +631,13 @@ adb forward tcp:1234 tcp:1234
 | `docs/architecture.md` | 模块、数据流、技术债 |
 | `docs/board.md` | 板子、工具链、部署、gdb |
 | `docs/roadmap.md` | 版本计划、验收 |
+| `docs/performance.md` | 性能指标、优化顺序 |
 | `docs/debug-log.md` | 真实踩坑记录 |
 | `docs/handoff.md` | 本文 |
+| `docs/handoff-prompt.md` | 新会话启动提示词 |
 
 ---
 
-## 13. 最后一句
+## 14. 最后一句
 
-> **当前不是“从零开始”，而是“零件齐全，差最后一条线”。**
-> 下一步只做一件事：把摄像头 YUYV 帧送到 LCD，完成 v0.1。
+> **v0.1 已完成；下一步是让画面连续动起来，而不是继续修黑边。**
