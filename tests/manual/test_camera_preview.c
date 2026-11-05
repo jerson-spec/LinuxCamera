@@ -15,12 +15,20 @@
 #include <errno.h>
 #include <strings.h>
 #include <stdlib.h>
+#include <signal.h>
 
 #include "lcd.h"
 #include "yuyv.h"
 #include "log.h"
 
 static int camera_fd;
+static volatile sig_atomic_t g_stop = 0;
+
+static void on_sigint(int sig)
+{
+    (void)sig;
+    g_stop = 1;         
+}
 
 static void Wrapping_up(unsigned char* buf)
 {
@@ -126,7 +134,6 @@ int main(int argc,char**argv)
 	unsigned char r,g,b;
 	unsigned int color;
 	int h,w;
-	int time;
 	size_t size;
 	struct fb_fix_screeninfo lcd_fix_screeninfo;
 	struct fb_var_screeninfo lcd_var_screeninfo;
@@ -276,77 +283,97 @@ int main(int argc,char**argv)
 	if(ret < 0) {
 	   // printf("Unable to start capture");
 		LOG_ERROR("Unable to start capture");
+	   for (i = 0; i < camera_cfg.buffers; i++) {
+	        	munmap(mem[i], buf_length[i]);
+		}
+		Wrapping_up(NULL);
 		return ret;
 	}
 
+	/** 注册信号处理函数 **/
+	if (signal(SIGINT, on_sigint) == SIG_ERR) {
+    	perror("signal");
+		for (i = 0; i < camera_cfg.buffers; i++) {
+	        	munmap(mem[i], buf_length[i]);
+		}
+		Wrapping_up(NULL);
+		return -1;
+	}
+
+	/** 分配rgbbuf空间并置初值0 **/
+	w = vfmt.fmt.pix.width;
+	h = vfmt.fmt.pix.height;
+	
+	size = (size_t)w * (size_t)h * 3;
+	rgbbuf = malloc(size);
+	if(rgbbuf == NULL)
+	{
+		fprintf(stderr, "%s,rgbbuf malloc error\n",__FUNCTION__);
+
+		for (i = 0; i < camera_cfg.buffers; i++) {
+       	 	munmap(mem[i], buf_length[i]);
+		}
+		Wrapping_up(NULL);
+		return -1;
+	}
+	memset(rgbbuf , 0 , size);
+		
 	/* 监听有数据可读 */
 	struct pollfd fds[1];
 	fds[0].fd = camera_fd;
 	fds[0].events = POLLIN;
-	if(poll(&fds[0], 1, 20000) == 1)
+
+	while(!g_stop)
 	{
-		/* 获得采集数据 */
-	 	struct v4l2_buffer buf;
-	    memset(&buf, 0, sizeof(struct v4l2_buffer));
-	    buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	    buf.memory = V4L2_MEMORY_MMAP;
-
-	    ret = ioctl(camera_fd, VIDIOC_DQBUF, &buf);
-	    if(ret < 0) {
-			perror("dequeue buffer");
-
-			for (i = 0; i < camera_cfg.buffers; i++) {
-		        munmap(mem[i], buf_length[i]);
-			}
-			Wrapping_up(NULL);
-			return -1;
-	    }		
-		
-		/* yuyv_to_rgb */
-		w = vfmt.fmt.pix.width;
-		h = vfmt.fmt.pix.height;
-
-		/** 检查buf.bytesused **/
-		if(buf.bytesused < (unsigned int)(w * h * 2))
+		fds[0].revents = 0;
+		ret = poll(&fds[0], 1, 2000);
+		if(ret == 0) 
 		{
-			fprintf(stderr, "short YUYV frame: %u < %d\n",buf.bytesused, w * h * 2);
+			LOG_WARN("poll timeout");
+			continue;
+		}
+		else if(ret < 0)
+		{
+			if(errno == EINTR) continue;
+			LOG_ERROR("poll %s",strerror(errno));
+			break;
+		}
+		else 
+		{
+			if(!(fds[0].revents & POLLIN))
+			{
+				LOG_WARN("poll revents mismatch: %hd",fds[0].revents);
+				continue;
+			}
 			
-			for (i = 0; i < camera_cfg.buffers; i++) {
-		        munmap(mem[i], buf_length[i]);
-			}
-			Wrapping_up(NULL);
-			return -1;
-		}
-		
-		size = (size_t)w * (size_t)h * 3;
-		rgbbuf = malloc(size);
-		if(rgbbuf == NULL)
-		{
-			fprintf(stderr, "%s,rgbbuf malloc error\n",__FUNCTION__);
+			/* 获得采集数据 */
+		 	struct v4l2_buffer buf;
+		    memset(&buf, 0, sizeof(struct v4l2_buffer));
+		    buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		    buf.memory = V4L2_MEMORY_MMAP;
 
-			for (i = 0; i < camera_cfg.buffers; i++) {
-	       	 	munmap(mem[i], buf_length[i]);
+		    ret = ioctl(camera_fd, VIDIOC_DQBUF, &buf);
+		    if(ret < 0) {
+				perror("dequeue buffer");
+				break;
+		    }	
+			
+			/** 检查buf.bytesused **/
+			if(buf.bytesused < (unsigned int)(w * h * 2))
+			{
+				fprintf(stderr, "short YUYV frame: %u < %d\n",buf.bytesused, w * h * 2);
+				continue;
 			}
-			Wrapping_up(NULL);
-			return -1;
-		}
-		memset(rgbbuf , 0 , size);
-		
-		ret = yuyv_to_rgb(mem[buf.index],rgbbuf,vfmt.fmt.pix.width,vfmt.fmt.pix.height);
-		if(ret < 0)
-		{
-			perror("yuyv to rgb");
-			for (i = 0; i < camera_cfg.buffers; i++) {
-	        	munmap(mem[i], buf_length[i]);
+			
+			/* yuyv_to_rgb */
+			ret = yuyv_to_rgb(mem[buf.index],rgbbuf,vfmt.fmt.pix.width,vfmt.fmt.pix.height);
+			if(ret < 0)
+			{
+				perror("yuyv to rgb");
+				break;
 			}
-			Wrapping_up(rgbbuf);
-			return -1;
-		}
-		
-		/* lcd_put_pixe */
-		time = lcd_cfg.lcd_display_time;
-		while(time--)
-		{
+			
+			/* lcd_put_pixe */
 			for(i = 0 ; i < h ; i++ )
 			{
 				for(j = 0 ; j < w ; j++)
@@ -362,36 +389,18 @@ int main(int argc,char**argv)
 					if(ret < 0)
 					{
 						fprintf(stderr, "lcd put pixel error, line:%d,column:%d\n",j,i);
-						for (i = 0; i < camera_cfg.buffers; i++) {
-				        	munmap(mem[i], buf_length[i]);
-						}
-						Wrapping_up(rgbbuf);
-						return -1;
+						break;
 					}
 				}
-			}	
-			sleep(1);
+			}				
+			
+			/* buffer放回队列 */
+			ret = ioctl(camera_fd, VIDIOC_QBUF, &buf);
+	        if(ret < 0) {
+	            fprintf(stderr,"line: %d,Unable to queue buffer",__LINE__);
+				break;
+	        }
 		}
-		
-		/* buffer放回队列 */
-		ret = ioctl(camera_fd, VIDIOC_QBUF, &buf);
-        if(ret < 0) {
-            fprintf(stderr,"line: %d,Unable to queue buffer",__LINE__);
-			for (i = 0; i < camera_cfg.buffers; i++) {
-	        	munmap(mem[i], buf_length[i]);
-			}
-			Wrapping_up(rgbbuf);
-			return -1;
-        }
-	}
-	else 
-	{
-		perror("poll");
-		for (i = 0; i < camera_cfg.buffers; i++) {
-        	munmap(mem[i], buf_length[i]);
-		}
-		Wrapping_up(NULL);
-		return -1;
 	}
 
 	/* 停止图片的采集 */
@@ -406,7 +415,7 @@ int main(int argc,char**argv)
 	
 	/* 释放buffer、收尾 */
 	for (i = 0; i < camera_cfg.buffers; i++) {
-	        munmap(mem[i], buf_length[i]);
+	      munmap(mem[i], buf_length[i]);
 	}
 	
 	Wrapping_up(rgbbuf);

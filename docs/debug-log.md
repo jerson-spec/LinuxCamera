@@ -39,9 +39,21 @@
   
   
 
-# camera_preview——26_11_05
+# [camera_preview]——26_11_05
 
 - 一开始编译成RelWithDebInfo时config打印混乱，camera.ini的配置项有的解析不出来，而lcd.ini的配置项就干脆全都没解析，在配置lcd下的config_print那里打印的还是camera.ini的信息，而且是阉割的信息，最后parse log level  error返回，后面发现问题应该是两次config_load，中间出了问题，第二次config_load会**复用同一个 buffer**，导致解析出现混乱，解决的办法是app_config_t定义camera cfg，lcd_cfg结构体后memset(&camera_cfg, 0, sizeof(camera_cfg));，memset(&lcd_cfg, 0, sizeof(camera_cfg));。先把这片空间初始成0，之后再使用，这样就没问题了，但是当我重新编译重新试验后，问题依然存在，后来这个问题我暂时没管，去调试，./build_dbg.sh，./deploy_dbg.sh，板子shell上先gdbserver :1234 ./test_camera_preview，ubuntu上再./gdb.sh test_camera_preview（后面一定要加test_camera_preview，不加的话默认调试的是test_Get_images），之后调试发现居然一点问题没有，我还以为是因为DEBUG的优化关系导致RelWithDebInfo不行DEBUG能行，后面才发现原来我修改完后没有rm -rf build-arm，直接./build.sh没有清**旧的 build 缓存**，所以依然失败，和优化并不相关；——这个错误也提示我在之后应当修改下app_config_t的形式，现在像是一锅大杂烩，各种设备的配置项全用一个结构体表示，不仅不规范，还可能造成错误，后面要把他分离一下；
+
 - 还有一个问题是gdb调试时发现的，程序在yuyv_to_rgb函数里走到	if(full == -1)，判断成立，直接返回-1，然后程序结束，根本走不到下面的lcd_put_pixel，这就是前面留的坑，在yuyv_to_rgb之前必须先调用yuyv.c里的Is_full_range函数根据配置项里是全范围还是有限范围置全局变量full = 1或0，不事先调用这个函数的话我在yuyv.c函数里默认给这个全局变量置值为-1，所以yuyv_to_rgb时出错，这个问题不难发现，后来在test_camera_preview函数里lcd_init 后补上 Is_full_range(&lcd_cfg) 即可;
+
 - 上机后直接执行./test_camera_preview会出现 “画面没有铺满屏幕，而是缩在左上角，并且左上角的画面显示为上面有一条混乱的雪花彩点，下面所有区域均为绿色”的情况，原因在于config/camera.ini里写的format默认是MJPEG/JPEG，而我们代码里做的是采集YUYV格式照片，然后YUYV to RGB，再lcd_put_pixel，所以把配置项里的这一项修改为YUYV即能解决问题，画面显示正常，缩在左上角，因为我们在配置项里选的分辨率是640 * 480，小于这个屏幕分辨率1024 * 600 ，又结合代码，缩在左上角是正常的；
+
 - 把配置项分辨率选择为1024x600后屏幕高度填满，长度没满，右边依然有黑条，原因在于V4L2 的 `S_FMT` 不是“强制设置”，而是“协商”，v4l2-ctl -d /dev/video1 --list-formats-ext检查摄像头设备（video1）支持的分辨率时发现YUYV下只有800x600，下一个就到了1280x720，所以`VIDIOC_S_FMT` 之后驱动就会返回最接近的 800×600 ，因此不是我们预期设置的值，没有填满lcd，想铺满 1024×600的话后面可以采取缩放的方式；
+
+  code -> git : 
+
+  ```
+  v0.1: camera YUYV preview on LCD
+  ```
+  ```
+  tag: v0.1
+  ```
