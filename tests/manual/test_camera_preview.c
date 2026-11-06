@@ -16,13 +16,27 @@
 #include <strings.h>
 #include <stdlib.h>
 #include <signal.h>
+#include <time.h>
 
 #include "lcd.h"
 #include "yuyv.h"
 #include "log.h"
 
-static int camera_fd;
+static int camera_fd = -1;
 static volatile sig_atomic_t g_stop = 0;
+
+static double get_time_ms(void)
+{
+	struct timespec ts;
+
+	// 获取单调时钟时间
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) == -1) {
+		LOG_ERROR("clock_gettime");
+		return 0.0;
+	}
+
+	return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0 ;
+}
 
 static void on_sigint(int sig)
 {
@@ -34,7 +48,7 @@ static void Wrapping_up(unsigned char* buf)
 {
 	if(buf != NULL)
 		free(buf);
-	if(camera_fd != 0)
+	if(camera_fd >= 0)
 		close(camera_fd);
 
 	if(lcd_deinit() < 0)
@@ -137,6 +151,11 @@ int main(int argc,char**argv)
 	size_t size;
 	struct fb_fix_screeninfo lcd_fix_screeninfo;
 	struct fb_var_screeninfo lcd_var_screeninfo;
+	unsigned int dq,q,frames;
+	double t0,t1,t2,t3,last_t0;
+	double wait_time,conv_time,draw_time,n;
+	last_t0 = wait_time = conv_time = draw_time = n = 0.0;
+	dq = q = frames = 0;
 
 	Get_lcd_parameters(&lcd_fix_screeninfo,&lcd_var_screeninfo);
 	
@@ -323,9 +342,15 @@ int main(int argc,char**argv)
 	fds[0].fd = camera_fd;
 	fds[0].events = POLLIN;
 
+	unsigned int last_sequence,have_sequence,dropped;
+	last_sequence = have_sequence = dropped = 0;
+
+	last_t0 = get_time_ms();
 	while(!g_stop)
 	{
 		fds[0].revents = 0;
+		t0 = get_time_ms();
+		
 		ret = poll(&fds[0], 1, 2000);
 		if(ret == 0) 
 		{
@@ -341,11 +366,16 @@ int main(int argc,char**argv)
 		else 
 		{
 			if(!(fds[0].revents & POLLIN))
-			{
+			{	
+				if(fds[0].revents & POLLERR || fds[0].revents & POLLHUP)
+				{
+					LOG_ERROR("poll exit");
+					break;
+				}
 				LOG_WARN("poll revents mismatch: %hd",fds[0].revents);
 				continue;
 			}
-			
+						
 			/* 获得采集数据 */
 		 	struct v4l2_buffer buf;
 		    memset(&buf, 0, sizeof(struct v4l2_buffer));
@@ -357,11 +387,28 @@ int main(int argc,char**argv)
 				perror("dequeue buffer");
 				break;
 		    }	
+			dq++;
+			t1 = get_time_ms();
+
+			/** 统计丢帧（序列号） **/
+			if(have_sequence && (buf.sequence - last_sequence) > 1)
+			{
+				dropped += buf.sequence - last_sequence - 1;
+			}
+			have_sequence = 1;
+			last_sequence = buf.sequence;
 			
 			/** 检查buf.bytesused **/
 			if(buf.bytesused < (unsigned int)(w * h * 2))
 			{
 				fprintf(stderr, "short YUYV frame: %u < %d\n",buf.bytesused, w * h * 2);
+				/*** buffer放回队列 ***/
+				ret = ioctl(camera_fd, VIDIOC_QBUF, &buf);
+		        if(ret < 0) {
+		            fprintf(stderr,"line: %d,Unable to queue buffer",__LINE__);
+					break;
+		        }
+				q++;
 				continue;
 			}
 			
@@ -372,6 +419,7 @@ int main(int argc,char**argv)
 				perror("yuyv to rgb");
 				break;
 			}
+			t2 = get_time_ms();
 			
 			/* lcd_put_pixe */
 			for(i = 0 ; i < h ; i++ )
@@ -393,6 +441,11 @@ int main(int argc,char**argv)
 					}
 				}
 			}				
+			t3 = get_time_ms();
+			wait_time += t1 - t0;
+			conv_time += t2 - t1;
+			draw_time += t3 - t2;
+			n++;
 			
 			/* buffer放回队列 */
 			ret = ioctl(camera_fd, VIDIOC_QBUF, &buf);
@@ -400,17 +453,26 @@ int main(int argc,char**argv)
 	            fprintf(stderr,"line: %d,Unable to queue buffer",__LINE__);
 				break;
 	        }
+			frames++;
+			q++;
+			
+			if((t3 - last_t0) >= 1000.0)
+			{
+				/** 每一秒打印一次信息 **/ //这一秒内的帧数、这一秒内每一帧的wait,conv,draw时间、全时间段内总丢帧数
+				double dt = t3 - last_t0;
+				LOG_INFO("fps: %.1f, wait: %.1f, conv: %.1f, draw: %.1f, dropped: %u",
+					n * 1000.0 / dt , wait_time / n , conv_time / n , draw_time / n , dropped);
+				last_t0 = t3;
+				wait_time = conv_time = draw_time = n = 0;
+			}
 		}
 	}
+
+	LOG_INFO("DQbuf: %u, Qbuf: %u, Frames:%u\n",dq,q,frames);
 
 	/* 停止图片的采集 */
 	 if(ioctl(camera_fd, VIDIOC_STREAMOFF, &type) != 0) {
         perror("stop capture");
-		for (i = 0; i < camera_cfg.buffers; i++) {
-        	munmap(mem[i], buf_length[i]);
-		}
-		Wrapping_up(rgbbuf);
-        return -1;
  	}
 	
 	/* 释放buffer、收尾 */
