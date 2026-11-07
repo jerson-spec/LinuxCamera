@@ -20,7 +20,13 @@ unsigned int fb_size;
 unsigned int lcd_size;
 
 static int fd;
-unsigned int draw_offset;
+static unsigned int draw_offset;
+static int Is_lcd_doublebuffering = 0;
+
+int lcd_doublebuffering_on(void)
+{
+	return Is_lcd_doublebuffering;
+}
 
 int lcd_flip(void)
 {
@@ -48,6 +54,8 @@ int lcd_flip(void)
 	{
 		LOG_ERROR("ioctl: FBIOPAN_DISPLAY, xoffset: %u, yoffset: %u",
 			lcd_var_screeninfo_t.xoffset,lcd_var_screeninfo_t.yoffset);
+		draw_offset = Is_lcd_doublebuffering = 0;
+		
 		return -1;
 	}
 	return y_offset;
@@ -131,16 +139,14 @@ int lcd_init(char* lcd_cfg_path , app_config_t *lcd_cfg_p)
 	/* var */
 	if(ioctl(fd , FBIOGET_VSCREENINFO ,&lcd_var_screeninfo_t) < 0)
 	{
-		//LOG_ERROR("ioctl lcd var error\n");
-		perror("ioctl lcd var");
+		//perror("ioctl lcd var");
+		fprintf(stderr,"line: %d, ioctl lcd var error",__LINE__);
 		return -1;
 	}
 	
 	/** 设置可变参数 **/
 	lcd_var_screeninfo_t.xres_virtual = lcd_var_screeninfo_t.xres;
 	lcd_var_screeninfo_t.yres_virtual = 2 * lcd_var_screeninfo_t.yres;
-
-	lcd_size = lcd_var_screeninfo_t.xres * lcd_var_screeninfo_t.yres * lcd_var_screeninfo_t.bits_per_pixel / 8;
 	
 	if(ioctl(fd , FBIOPUT_VSCREENINFO ,&lcd_var_screeninfo_t) < 0)
 	{
@@ -148,7 +154,22 @@ int lcd_init(char* lcd_cfg_path , app_config_t *lcd_cfg_p)
 		return -1;
 	}
 
-	/* 获取lCD信息 */
+	/* 更新lCD信息 */
+	/* var */
+	if(ioctl(fd , FBIOGET_VSCREENINFO ,&lcd_var_screeninfo_t) < 0)
+	{
+		//LOG_ERROR("ioctl lcd var error\n");
+		fprintf(stderr,"line: %d, ioctl lcd var error",__LINE__);
+		return -1;
+	}
+	/** 检查可变参数设置是否成功 **/
+	if(lcd_var_screeninfo_t.yres_virtual != 2 * lcd_var_screeninfo_t.yres)
+	{ 
+		fprintf(stderr,"yres_virtual: %u != 2 * yres: %u",lcd_var_screeninfo_t.yres_virtual
+			, 2 * lcd_var_screeninfo_t.yres);
+		return -1;
+	}
+	
 	/* fix */
 	if(ioctl(fd , FBIOGET_FSCREENINFO ,&lcd_fix_screeninfo_t) < 0)
 	{	
@@ -157,12 +178,15 @@ int lcd_init(char* lcd_cfg_path , app_config_t *lcd_cfg_p)
 		return -1;
 	}
 
+	lcd_size = lcd_var_screeninfo_t.yres * lcd_fix_screeninfo_t.line_length;
+
 	/* mmap映射 */
 	fb_size = lcd_fix_screeninfo_t.smem_len;
 	
 	/** 检查smem_len大小 **/
 	if(fb_size >= 2 * lcd_size)
 	{
+		LOG_INFO("fb_size: %u, lcd_size: %u",fb_size,lcd_size);
 		mem_addr = mmap(NULL, fb_size, PROT_READ | PROT_WRITE, MAP_SHARED , fd, 0);
 		if(mem_addr == MAP_FAILED )
 		{		
@@ -177,6 +201,8 @@ int lcd_init(char* lcd_cfg_path , app_config_t *lcd_cfg_p)
 		LOG_ERROR("fb_size: %u, lcd_size: %u",fb_size,lcd_size);
 		return -1;
 	}
+	Is_lcd_doublebuffering = 1;
+	draw_offset = lcd_size;
 	
 	return 0;
 }

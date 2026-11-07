@@ -431,12 +431,6 @@ int main(int argc,char**argv)
 			q++;
 			
 			/* lcd_put_pixe */
-			if(lcd_flip() < 0)
-			{
-				fprintf(stderr,"line: %d , lcd filp error",__LINE__);
-				break;
-			}
-			
 			for(i = 0 ; i < h ; i++ )
 			{
 				for(j = 0 ; j < w ; j++)
@@ -472,6 +466,17 @@ int main(int argc,char**argv)
 					n * 1000.0 / dt , wait_time / n , conv_time / n , draw_time / n , dropped);
 				last_t0 = t3;
 				wait_time = conv_time = draw_time = n = 0;
+			}
+
+			/** double buffering choice **/
+			if(lcd_doublebuffering_on())
+			{
+				if(lcd_flip() < 0)
+				{
+					fprintf(stderr,"line: %d , lcd filp error\n",__LINE__);
+					LOG_INFO("double buffering downgrade --> single buffering\n");
+					continue;
+				}
 			}
 		}
 	}

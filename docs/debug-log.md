@@ -98,3 +98,25 @@
 
 
 
+# [ Enable double buffering ]——26_11_07
+
+- 这里关键是在获取可变参数后设置xres_virtual和yres_virtual，把yres_virtual设置成两倍于lcd分辨率yres，然后再在mmap之前判断一下fb_size，lcd_fix_screeninfo_t.smem_len是否大于两倍的lcd分辨率大小，这里有个坑，是lcd分辨率大小计算时我一开始xres * yres 忘记乘bits_per_pixel了，结果就是这个值很小，和fb_size的34,359,738,368结果，也就是32M相去甚远，这样显然是错误的，这里我能够发现这个问题是因为恰巧这时候检查smem_len大小的判断条件我写的是fb_size == 2 * lcd_size，这个条件显然是不成立的，应该写成大于等于，所以走下面的LOG_ERROR分支把fb_size和lcd_size都打印出来；说来好笑，改完这个还不对，因为没有除以8算字节数，结果就是这个值非常大，这样显然也是错误的，不用==，就算改成>=依然走LOG_ERROR分支把错误打印出来，这两个问题都比较好发现；——一开始我还分不清fb_size，即lcd_fix_screeninfo_t.smem_len，和我们设置的yres_virtual 之间的关系，我以为既然我们设置了xres_virtual ,yres_virtual ，那再重新FBIOGET_FSCREENINFO获取lcd_fix_screeninfo_t.smem_len的时候这个“Length of frame buffer mem”值他会给我们分配为等于这个xres_virtual * yres_virtual 的字节数，实际上并不是这样的，”smem_len 是 驱动 probe 时预留的整块显存（本例 32MB），而yres_virtual  只是告诉驱动“这块内存里，前 1200 行是有效的”“，关于这个的概念模糊是引发我下面很多处错误的罪魁祸首；
+
+- 改完了下面的lcd_init里的相应内容分配好了空间就到上面的lcd_flip函数了，这里面最关键的就是两件事，一是设置绘制翻转，一是设置显示翻转，二者取反，设置区域为绘制另一个区域就显示，设置区域为显示另一个区域就绘制，对应涉及到两个偏移，关于绘制的翻转，只需要在我们原先的pos = mem_addr + y * lcd_fix_screeninfo_t.line_length + x * lcd_var_screeninfo_t.bits_per_pixel / 8;公式基础上加上一个draw_offset ，然后draw_offset 在0和lcd_size lcd分辨率大小之间来回取值即可，这里注意我一开始把他设置的是 xres *yres *bitsperpixel /8，这样不兼容不紧凑的情况，更好的是改成lcd_var_screeninfo_t.yres * lcd_fix_screeninfo_t.line_length；关于显示的翻转，涉及到ioctl FBIOPAN_DISPLAY函数，由他来设置可见区，而这个的偏移计算就用lcd_size / lcd_fix_screeninfo_t.line_length，算出y方向像素偏移，这个值在这里就等于lcd yres分辨率，之后y_offset在0和lcd_size / lcd_fix_screeninfo_t.line_length之间来回取值即可实现可见区在两块区域间不停切换；
+
+- 上机实验发现走到lcd.c 里ioctl FBIOPAN_DISPLAY函数后判断条件不成立走下面的LOG_ERROR("ioctl: FBIOPAN_DISPLAY, xoffset: %u, yoffset: %u",...)分支，因为一开始我没加ioctl 里返回-1的处理，和test_camera_preview.c里调用lcd_flip函数后返回值的判断，所以结果就表现为一直打印LOG_ERROR信息，但是LOG_ERROR打印出来的现象又是符合我们代码逻辑的，即xoffset一直为0，yoffset在0和600之间来回切换（lcd分辨率大小是1024*600），这实际上能证明双缓冲切换是成功了的；这就很奇怪，一开始我还以为设备不支持FBIOPAN_DISPLAY，都已经找好了后备方案（自己 `malloc` 一块  RGB565 后台缓冲，画完 `memcpy` 到 fb），后面重新编译debug，上机gdb调试，结果发现好了，lcd_flip函数成功执行完返回，再去执行lcd_put_pixel（这个时候没注意lcd_put_pixel和lcd_flip的先后顺序，实际上lcd_flip应该在lcd_put_pixel之后，否则最后绘制的一帧永远显示不到，这是关于尾帧的处理，关于首帧的处理也很有意思，注意到lcd_put_pixel函数和lcd_flip函数的关联仔细琢磨能处理好，后面我都改好了），后面才发现原来和lcd的控制台消隐、屏幕休眠有关，休眠时设置ioctl FBIOPAN_DISPLAY会失败，所以结果<0走error分支，后面查询了一下方法，echo 0 > /sys/class/graphics/fb0/blank临时唤醒，echo -e "\033[9;15]" > /dev/tty0设置持续显示15分钟，15改成0完全禁止消隐（屏幕常亮），之后再实验，果然就没有再出现过ioctl FBIOPAN_DISPLAY失败的问题；——另外发现debug模式下相机显示画面明显有延迟、滞后，相比之下build type为RelWithDebInfo的情况下相机的拍摄就顺畅很多，这在我openzen-visualizer的项目里也有所体会；
+
+  code -> git : 
+
+  ```
+   Enable double buffering
+  ```
+
+  
+
+ # [ Add double buffering downgrade ]——26_11_07
+
+- lcd初始化函数里如果成功分配了双缓冲空间，就置全局变量Is_lcd_doublebuffering为1，再创建一个函数int lcd_doublebuffering_on(void)在里面只做一件事——把这个全局变量返回去，这样test_camera_preview函数先调用该函数判断Is_lcd_doublebuffering的值，判断成功设置了双缓冲才执行下面的lcd_flip函数，否则降级为单缓冲：一方面由于draw_offset是全局变量，如果一开始lcd_init后Is_lcd_doublebuffering没被置为1，那执行到if(lcd_doublebuffering_on())直接跳出去，再下一轮lcd_put_pixel里pos = mem_addr + draw_offset + y * lcd_fix_screeninfo_t.line_length + x * lcd_var_screeninfo_t.bits_per_pixel / 8;，draw_offset为0，照常绘制，是单缓冲；另一方面如果一开始test_camera_preview里调用lcd_init后，lcd_init里确实把Is_lcd_doublebuffering置为1，返回来条件成立可以往下继续执行到下面的lcd_flip函数里执行ioctl FBIOPAN_DISPLAY，如果在这里失败，那就表明双缓冲切换失败，于是就去把Is_lcd_doublebuffering以及draw_offset都置为0，再返回-1，回test_camera_preview判断失败后直接continue，这样下轮循环以及之后就都不走if(lcd_doublebuffering_on())分支了，lcd_put_pixel依然照常绘制，draw_offset为0，是单缓冲；
+- 这里一开始我把全局变量变量名和int lcd_doublebuffering_on(void)函数函数名都取作lcd_doublebuffering_on，结果编译错误，所以不要把函数名和变量名取作一样；
+- 如上所述，最后一帧丢失、一开始黑帧：把lcd_flip放到lcd_put_pixel之后，另外不要夹在时间计算那一堆东西里，所以后面干脆放到了最后；在lcd_init最后把draw_offset 设为lcd_size（改lcd_flip里起始y_offset也行，但麻烦，还容易出错（变量赋值失败（左值？、右值？）），在lcd_init里加draw_offset起始绘制偏移最省事）；
+- 设置可变参数后要更新lcd_var_screeninfo_t和lcd_fix_screeninfo_t才能继续读变量值，一开始我以为设置可变参数后只需要更新lcd_var_screeninfo_t，判断一下lcd_var_screeninfo_t.yres_virtual是不是成功设置成等于两倍lcd_var_screeninfo_t.yres就够了，实际上接下来要读lcd_fix_screeninfo_t.smem_len的话也需要更新lcd_fix_screeninfo_t后才能读，原因是“在 Linux framebuffer 框架下，调用 `FBIOPUT_VSCREENINFO`（即 `PUT_VSCREENINFO`）**确实有可能改变** `fb_fix_screeninfo` 中的 `line_length` 和 `smem_len`，`fb_fix_screeninfo` 之所以被称为“固定”，**并非指这些值在整个系统生命周期内绝对不变**，而是指**应用程序不能直接指定或修改它们**。这些值由驱动程序根据硬件能力和当前选定的视频模式计算得出，对用户空间而言是**只读**的。”——更具体的解释见obsidian；
