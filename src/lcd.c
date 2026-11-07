@@ -17,8 +17,41 @@ struct fb_fix_screeninfo lcd_fix_screeninfo_t;
 struct fb_var_screeninfo lcd_var_screeninfo_t;
 unsigned char* mem_addr;
 unsigned int fb_size;
-static int fd;
+unsigned int lcd_size;
 
+static int fd;
+unsigned int draw_offset;
+
+int lcd_flip(void)
+{
+	static unsigned int y_offset = 0;
+	
+	/* 计算offset */
+	if(y_offset == 0)
+	{
+		draw_offset = 0;
+		y_offset = lcd_size / lcd_fix_screeninfo_t.line_length;
+	}
+	else if(y_offset == lcd_size / lcd_fix_screeninfo_t.line_length)
+	{
+		draw_offset = lcd_size;
+		y_offset = 0;
+	}
+	else
+		LOG_WARN("offset: %u mismatch",y_offset);
+	
+	/* ioctl FBIOPAN_DISPLAY */
+	lcd_var_screeninfo_t.xoffset = 0;
+	lcd_var_screeninfo_t.yoffset = y_offset;
+	
+	if(ioctl(fd , FBIOPAN_DISPLAY ,&lcd_var_screeninfo_t) < 0)
+	{
+		LOG_ERROR("ioctl: FBIOPAN_DISPLAY, xoffset: %u, yoffset: %u",
+			lcd_var_screeninfo_t.xoffset,lcd_var_screeninfo_t.yoffset);
+		return -1;
+	}
+	return y_offset;
+}
 
 int lcd_put_pixel(unsigned int x, unsigned int y , unsigned int color)
 {
@@ -31,7 +64,7 @@ int lcd_put_pixel(unsigned int x, unsigned int y , unsigned int color)
 		fprintf(stderr,"%s", "Exceeds resolution\n");
 		return -1;
 	}
-	pos = mem_addr + y * lcd_fix_screeninfo_t.line_length + x * 
+	pos = mem_addr + draw_offset + y * lcd_fix_screeninfo_t.line_length + x * 
 		lcd_var_screeninfo_t.bits_per_pixel / 8;
 
 	if(lcd_var_screeninfo_t.bits_per_pixel == 16)
@@ -95,13 +128,6 @@ int lcd_init(char* lcd_cfg_path , app_config_t *lcd_cfg_p)
 	}
 
 	/* 获取lCD信息 */
-	/* fix */
-	if(ioctl(fd , FBIOGET_FSCREENINFO ,&lcd_fix_screeninfo_t) < 0)
-	{	
-		//LOG_ERROR("ioctl lcd fix error\n");
-		perror("ioctl lcd fix");
-		return -1;
-	}
 	/* var */
 	if(ioctl(fd , FBIOGET_VSCREENINFO ,&lcd_var_screeninfo_t) < 0)
 	{
@@ -109,18 +135,49 @@ int lcd_init(char* lcd_cfg_path , app_config_t *lcd_cfg_p)
 		perror("ioctl lcd var");
 		return -1;
 	}
+	
+	/** 设置可变参数 **/
+	lcd_var_screeninfo_t.xres_virtual = lcd_var_screeninfo_t.xres;
+	lcd_var_screeninfo_t.yres_virtual = 2 * lcd_var_screeninfo_t.yres;
+
+	lcd_size = lcd_var_screeninfo_t.xres * lcd_var_screeninfo_t.yres * lcd_var_screeninfo_t.bits_per_pixel / 8;
+	
+	if(ioctl(fd , FBIOPUT_VSCREENINFO ,&lcd_var_screeninfo_t) < 0)
+	{
+		perror("ioctl put lcd var");
+		return -1;
+	}
+
+	/* 获取lCD信息 */
+	/* fix */
+	if(ioctl(fd , FBIOGET_FSCREENINFO ,&lcd_fix_screeninfo_t) < 0)
+	{	
+		//LOG_ERROR("ioctl lcd fix error\n");
+		perror("ioctl lcd fix");
+		return -1;
+	}
 
 	/* mmap映射 */
 	fb_size = lcd_fix_screeninfo_t.smem_len;
-	mem_addr = mmap(NULL, fb_size, PROT_READ | PROT_WRITE, MAP_SHARED , fd, 0);
-	if(mem_addr == MAP_FAILED )
-	{		
-		//LOG_ERROR("mmap error\n");
-		perror("mmap");
+	
+	/** 检查smem_len大小 **/
+	if(fb_size >= 2 * lcd_size)
+	{
+		mem_addr = mmap(NULL, fb_size, PROT_READ | PROT_WRITE, MAP_SHARED , fd, 0);
+		if(mem_addr == MAP_FAILED )
+		{		
+			//LOG_ERROR("mmap error\n");
+			perror("mmap");
+			return -1;
+		}
+		memset(mem_addr , 0 ,fb_size);
+	}
+	else
+	{
+		LOG_ERROR("fb_size: %u, lcd_size: %u",fb_size,lcd_size);
 		return -1;
 	}
-	memset(mem_addr , 0 ,fb_size);
-
+	
 	return 0;
 }
 

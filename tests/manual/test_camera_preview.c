@@ -68,7 +68,7 @@ static unsigned int pixfmt_from_string(const char *s)
 
 
 /*
-*	./test_Get_images [path/camera.ini] [path/lcd.ini]
+*	./test_camera_preview [path/camera.ini] [path/lcd.ini]
 */
 int main(int argc,char**argv)
 {
@@ -420,8 +420,23 @@ int main(int argc,char**argv)
 				break;
 			}
 			t2 = get_time_ms();
+
+			/* buffer放回队列 */
+			ret = ioctl(camera_fd, VIDIOC_QBUF, &buf);
+	        if(ret < 0) {
+	            fprintf(stderr,"line: %d,Unable to queue buffer",__LINE__);
+				break;
+	        }
+			frames++;
+			q++;
 			
 			/* lcd_put_pixe */
+			if(lcd_flip() < 0)
+			{
+				fprintf(stderr,"line: %d , lcd filp error",__LINE__);
+				break;
+			}
+			
 			for(i = 0 ; i < h ; i++ )
 			{
 				for(j = 0 ; j < w ; j++)
@@ -447,19 +462,12 @@ int main(int argc,char**argv)
 			draw_time += t3 - t2;
 			n++;
 			
-			/* buffer放回队列 */
-			ret = ioctl(camera_fd, VIDIOC_QBUF, &buf);
-	        if(ret < 0) {
-	            fprintf(stderr,"line: %d,Unable to queue buffer",__LINE__);
-				break;
-	        }
-			frames++;
-			q++;
-			
+			/** 每一秒打印一次信息 **/ 
 			if((t3 - last_t0) >= 1000.0)
 			{
-				/** 每一秒打印一次信息 **/ //这一秒内的帧数、这一秒内每一帧的wait,conv,draw时间、全时间段内总丢帧数
 				double dt = t3 - last_t0;
+				
+				//这一秒内的帧数、这一秒内每一帧的wait,conv,draw时间、全时间段内总丢帧数
 				LOG_INFO("fps: %.1f, wait: %.1f, conv: %.1f, draw: %.1f, dropped: %u",
 					n * 1000.0 / dt , wait_time / n , conv_time / n , draw_time / n , dropped);
 				last_t0 = t3;
