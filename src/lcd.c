@@ -21,6 +21,7 @@ unsigned int lcd_size;
 
 static int fd;
 static unsigned int draw_offset;
+
 static int Is_lcd_doublebuffering = 0;
 
 int lcd_doublebuffering_on(void)
@@ -31,16 +32,21 @@ int lcd_doublebuffering_on(void)
 int lcd_flip(void)
 {
 	static unsigned int y_offset = 0;
-	
+	static unsigned int visible_offset = 0;
+
 	/* 计算offset */
 	if(y_offset == 0)
 	{
 		draw_offset = 0;
+		
+		visible_offset = lcd_size;
 		y_offset = lcd_size / lcd_fix_screeninfo_t.line_length;
 	}
 	else if(y_offset == lcd_size / lcd_fix_screeninfo_t.line_length)
 	{
 		draw_offset = lcd_size;
+		
+		visible_offset = 0;
 		y_offset = 0;
 	}
 	else
@@ -54,11 +60,13 @@ int lcd_flip(void)
 	{
 		LOG_ERROR("ioctl: FBIOPAN_DISPLAY, xoffset: %u, yoffset: %u",
 			lcd_var_screeninfo_t.xoffset,lcd_var_screeninfo_t.yoffset);
-		draw_offset = Is_lcd_doublebuffering = 0;
+		
+		Is_lcd_doublebuffering = 0;
+		draw_offset = visible_offset;
 		
 		return -1;
 	}
-	return y_offset;
+	return 0;
 }
 
 int lcd_put_pixel(unsigned int x, unsigned int y , unsigned int color)
@@ -194,7 +202,7 @@ int lcd_init(char* lcd_cfg_path , app_config_t *lcd_cfg_p)
 			perror("mmap");
 			return -1;
 		}
-		memset(mem_addr , 0 ,fb_size);
+		memset(mem_addr , 0 , 2 * lcd_size);
 	}
 	else
 	{
@@ -213,7 +221,7 @@ int lcd_deinit(void)
 	close(fd);
 	log_close();
 	
-	memset(mem_addr , 0 ,fb_size);
+	memset(mem_addr , 0 , 2 * lcd_size);
 	if(munmap(mem_addr , fb_size) < 0 )
 	{
 		perror("munmap");

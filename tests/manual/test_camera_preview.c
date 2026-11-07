@@ -344,7 +344,8 @@ int main(int argc,char**argv)
 
 	unsigned int last_sequence,have_sequence,dropped;
 	last_sequence = have_sequence = dropped = 0;
-
+	int poll_timeout_cnt = 0;
+	
 	last_t0 = get_time_ms();
 	while(!g_stop)
 	{
@@ -355,11 +356,22 @@ int main(int argc,char**argv)
 		if(ret == 0) 
 		{
 			LOG_WARN("poll timeout");
+			poll_timeout_cnt++;
+			if(poll_timeout_cnt >= 3)
+			{
+				LOG_ERROR("poll timeout: %d times!",poll_timeout_cnt);
+				ret = -1;
+				break;
+			}
 			continue;
 		}
 		else if(ret < 0)
 		{
-			if(errno == EINTR) continue;
+			if(errno == EINTR) 
+			{
+				ret = 0;
+				continue;
+			}
 			LOG_ERROR("poll %s",strerror(errno));
 			break;
 		}
@@ -445,11 +457,19 @@ int main(int argc,char**argv)
 					ret = lcd_put_pixel((unsigned int)j , (unsigned int)i , color);
 					if(ret < 0)
 					{
-						fprintf(stderr, "lcd put pixel error, line:%d,column:%d\n",j,i);
+						fprintf(stderr, "lcd put pixel error, line:%d,column:%d\n",i,j);
 						break;
 					}
 				}
+				if(ret < 0)
+				{
+					break;
+				}
 			}				
+			if(ret < 0)
+			{
+				break;
+			}
 			t3 = get_time_ms();
 			wait_time += t1 - t0;
 			conv_time += t2 - t1;
@@ -494,6 +514,9 @@ int main(int argc,char**argv)
 	}
 	
 	Wrapping_up(rgbbuf);
+	
+	if(ret < 0)
+		return -1;
 	
 	return 0;
 }
