@@ -58,7 +58,8 @@ int main(int argc,char** argv)
         fprintf(stderr, "unsupported format: %s\n", cfg.format);
         return -1;
     }
-
+	const char *ext = (!strcasecmp(cfg.format, "YUYV")) ? "yuv" : "jpg";
+	
     if (mkdir(cfg.save_dir, 0755) < 0 && errno != EEXIST) {
         perror("mkdir");
         return -1;
@@ -301,7 +302,7 @@ int main(int argc,char** argv)
 			    }		
 
 				/* 输出图片 */
-				sprintf(filename,"%s/image%02d.%s",cfg.save_dir,j,cfg.format);	
+				sprintf(filename,"%s/image%02d.%s",cfg.save_dir,j,ext);	
 				
 				file_fd = open(filename , O_RDWR | O_CREAT | O_TRUNC, 0666);
 				if(file_fd < 0)
@@ -320,7 +321,7 @@ int main(int argc,char** argv)
 				{
 					printf("Taking picture: %d\n",j);
 					//LOG_INFO("Taking picture: image%02d.jpg in %s\n",j,cfg.save_dir);
-					LOG_DEBUG("Taking picture: image%02d.jpg in %s\n",j,cfg.save_dir);
+					LOG_DEBUG("Taking picture: image%02d.%s in %s\n",j,ext,cfg.save_dir);
 					j++;
 				}
 					

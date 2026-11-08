@@ -31,30 +31,14 @@ int lcd_doublebuffering_on(void)
 
 int lcd_flip(void)
 {
-	static unsigned int y_offset = 0;
 	static unsigned int visible_offset = 0;
-
-	/* 计算offset */
-	if(y_offset == 0)
-	{
-		draw_offset = 0;
-		
-		visible_offset = lcd_size;
-		y_offset = lcd_size / lcd_fix_screeninfo_t.line_length;
-	}
-	else if(y_offset == lcd_size / lcd_fix_screeninfo_t.line_length)
-	{
-		draw_offset = lcd_size;
-		
-		visible_offset = 0;
-		y_offset = 0;
-	}
-	else
-		LOG_WARN("offset: %u mismatch",y_offset);
+	unsigned int display_target = (visible_offset == 0)? lcd_size : 0;
+	unsigned int display_target_y = display_target / lcd_fix_screeninfo_t.line_length;
+	
 	
 	/* ioctl FBIOPAN_DISPLAY */
 	lcd_var_screeninfo_t.xoffset = 0;
-	lcd_var_screeninfo_t.yoffset = y_offset;
+	lcd_var_screeninfo_t.yoffset = display_target_y;
 	
 	if(ioctl(fd , FBIOPAN_DISPLAY ,&lcd_var_screeninfo_t) < 0)
 	{
@@ -66,6 +50,10 @@ int lcd_flip(void)
 		
 		return -1;
 	}
+	
+	visible_offset = display_target;
+	draw_offset = (display_target == 0) ? lcd_size : 0;
+	
 	return 0;
 }
 
@@ -175,6 +163,7 @@ int lcd_init(char* lcd_cfg_path , app_config_t *lcd_cfg_p)
 	{ 
 		fprintf(stderr,"yres_virtual: %u != 2 * yres: %u",lcd_var_screeninfo_t.yres_virtual
 			, 2 * lcd_var_screeninfo_t.yres);
+		
 		return -1;
 	}
 	

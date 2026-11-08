@@ -25,6 +25,28 @@
 static int camera_fd = -1;
 static volatile sig_atomic_t g_stop = 0;
 
+
+/* 返回当前进程的 VmRSS，单位 kB；失败返回 -1 */
+static long get_vmrss_kb(void)
+{
+    FILE *fp = fopen("/proc/self/status", "r");
+    char line[256];
+    long kb = -1;
+
+    if (fp == NULL)
+        return -1;
+
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        if (strncmp(line, "VmRSS:", 6) == 0) {
+            sscanf(line + 6, "%ld", &kb);
+            break;
+        }
+    }
+    fclose(fp);
+
+    return kb;
+}
+
 static double get_time_ms(void)
 {
 	struct timespec ts;
@@ -306,7 +328,7 @@ int main(int argc,char**argv)
 	        	munmap(mem[i], buf_length[i]);
 		}
 		Wrapping_up(NULL);
-		return ret;
+		return -1;
 	}
 
 	/** 注册信号处理函数 **/
@@ -345,6 +367,7 @@ int main(int argc,char**argv)
 	unsigned int last_sequence,have_sequence,dropped;
 	last_sequence = have_sequence = dropped = 0;
 	int poll_timeout_cnt = 0;
+	int exit_code = 0;
 	
 	last_t0 = get_time_ms();
 	while(!g_stop)
@@ -360,7 +383,7 @@ int main(int argc,char**argv)
 			if(poll_timeout_cnt >= 3)
 			{
 				LOG_ERROR("poll timeout: %d times!",poll_timeout_cnt);
-				ret = -1;
+				exit_code = -1;
 				break;
 			}
 			continue;
@@ -373,6 +396,7 @@ int main(int argc,char**argv)
 				continue;
 			}
 			LOG_ERROR("poll %s",strerror(errno));
+			exit_code = -2;
 			break;
 		}
 		else 
@@ -382,6 +406,7 @@ int main(int argc,char**argv)
 				if(fds[0].revents & POLLERR || fds[0].revents & POLLHUP)
 				{
 					LOG_ERROR("poll exit");
+					exit_code = -3;
 					break;
 				}
 				LOG_WARN("poll revents mismatch: %hd",fds[0].revents);
@@ -396,10 +421,13 @@ int main(int argc,char**argv)
 
 		    ret = ioctl(camera_fd, VIDIOC_DQBUF, &buf);
 		    if(ret < 0) {
-				perror("dequeue buffer");
+				LOG_ERROR("dequeue buffer: %s",strerror(errno));
+				exit_code = -4;
 				break;
 		    }	
 			dq++;
+			poll_timeout_cnt = 0;
+			
 			t1 = get_time_ms();
 
 			/** 统计丢帧（序列号） **/
@@ -414,10 +442,12 @@ int main(int argc,char**argv)
 			if(buf.bytesused < (unsigned int)(w * h * 2))
 			{
 				fprintf(stderr, "short YUYV frame: %u < %d\n",buf.bytesused, w * h * 2);
+				
 				/*** buffer放回队列 ***/
 				ret = ioctl(camera_fd, VIDIOC_QBUF, &buf);
 		        if(ret < 0) {
-		            fprintf(stderr,"line: %d,Unable to queue buffer",__LINE__);
+		            LOG_ERROR("line: %d,Unable to queue buffer",__LINE__);
+					exit_code = -5;
 					break;
 		        }
 				q++;
@@ -428,7 +458,8 @@ int main(int argc,char**argv)
 			ret = yuyv_to_rgb(mem[buf.index],rgbbuf,vfmt.fmt.pix.width,vfmt.fmt.pix.height);
 			if(ret < 0)
 			{
-				perror("yuyv to rgb");
+				LOG_ERROR("yuyv to rgb: %s",strerror(errno));
+				exit_code = -6;
 				break;
 			}
 			t2 = get_time_ms();
@@ -436,7 +467,8 @@ int main(int argc,char**argv)
 			/* buffer放回队列 */
 			ret = ioctl(camera_fd, VIDIOC_QBUF, &buf);
 	        if(ret < 0) {
-	            fprintf(stderr,"line: %d,Unable to queue buffer",__LINE__);
+	            LOG_ERROR("line: %d,Unable to queue buffer",__LINE__);
+				exit_code = -7;
 				break;
 	        }
 			frames++;
@@ -457,7 +489,7 @@ int main(int argc,char**argv)
 					ret = lcd_put_pixel((unsigned int)j , (unsigned int)i , color);
 					if(ret < 0)
 					{
-						fprintf(stderr, "lcd put pixel error, line:%d,column:%d\n",i,j);
+						LOG_ERROR("lcd put pixel error, line:%d,column:%d",i,j);
 						break;
 					}
 				}
@@ -468,6 +500,7 @@ int main(int argc,char**argv)
 			}				
 			if(ret < 0)
 			{
+				exit_code = -8;
 				break;
 			}
 			t3 = get_time_ms();
@@ -482,8 +515,8 @@ int main(int argc,char**argv)
 				double dt = t3 - last_t0;
 				
 				//这一秒内的帧数、这一秒内每一帧的wait,conv,draw时间、全时间段内总丢帧数
-				LOG_INFO("fps: %.1f, wait: %.1f, conv: %.1f, draw: %.1f, dropped: %u",
-					n * 1000.0 / dt , wait_time / n , conv_time / n , draw_time / n , dropped);
+				LOG_INFO("fps: %.1f, wait: %.1f, conv: %.1f, draw: %.1f, dropped: %u, rss: %ld kB",
+					n * 1000.0 / dt , wait_time / n , conv_time / n , draw_time / n , dropped, get_vmrss_kb());
 				last_t0 = t3;
 				wait_time = conv_time = draw_time = n = 0;
 			}
@@ -493,15 +526,15 @@ int main(int argc,char**argv)
 			{
 				if(lcd_flip() < 0)
 				{
-					fprintf(stderr,"line: %d , lcd filp error\n",__LINE__);
-					LOG_INFO("double buffering downgrade --> single buffering\n");
+					LOG_ERROR("line: %d , lcd filp error",__LINE__);
+					LOG_INFO("double buffering downgrade --> single buffering");
 					continue;
 				}
 			}
 		}
 	}
 
-	LOG_INFO("DQbuf: %u, Qbuf: %u, Frames:%u\n",dq,q,frames);
+	LOG_INFO("DQbuf: %u, Qbuf: %u, Frames:%u",dq,q,frames);
 
 	/* 停止图片的采集 */
 	 if(ioctl(camera_fd, VIDIOC_STREAMOFF, &type) != 0) {
@@ -515,8 +548,11 @@ int main(int argc,char**argv)
 	
 	Wrapping_up(rgbbuf);
 	
-	if(ret < 0)
+	if(exit_code != 0)
+	{
+		LOG_ERROR("error exit_code: %d",exit_code);
 		return -1;
+	}
 	
 	return 0;
 }
