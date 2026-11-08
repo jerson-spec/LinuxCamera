@@ -10,9 +10,9 @@ static int full = -1;
 /*
 *	辅助函数：对unsigned char,越界数处理
 */
-static void clamp(int *val)
+static inline int clamp(int val)
 {
-	*val = (*val < 0)? 0 : ((*val > 255)? 255 : *val);
+	return (val < 0)? 0 : ((val > 255)? 255 : val);
 }
 
 /*
@@ -39,14 +39,12 @@ void Is_full_range(app_config_t *trans_cfg_p)
 	}
 }
 
-
 /*
 *	BT.601、无stride、w必须为偶数
 */
 int yuyv_to_rgb(unsigned char* yuyvdata,unsigned char* rgbdata,int width,int height)
 {
 	int i;
-	unsigned char data[4];
 	unsigned char Y0,U0,Y1,V1;
 	int r0,g0,b0,r1,g1,b1;
 
@@ -63,74 +61,111 @@ int yuyv_to_rgb(unsigned char* yuyvdata,unsigned char* rgbdata,int width,int hei
 	}
 	
 	/* 分情况处理 */
-	for(i = 0 ; i < width * height/2 ; i++)
+	if(full) 		
 	{
- 		memcpy(data , &yuyvdata[i * 4] , 4);	
-		// Y0 U0 Y1 V1 -> Y0 U0 V1 | Y1 U0 V1 -> R G B
-		Y0 = data[0];
-		U0 = data[1];
-		Y1 = data[2];
-		V1 = data[3];
-
-		if(full) 		
+		for(i = 0 ; i < width * height/2 ; i++)
 		{
+			// Y0 U0 Y1 V1 -> Y0 U0 V1 | Y1 U0 V1 -> R G B
+			Y0 = yuyvdata[0];
+			U0 = yuyvdata[1];
+			Y1 = yuyvdata[2];
+			V1 = yuyvdata[3];
+			
+			int u = (U0 - 128);
+			int v = (V1 - 128);
+			
+			int r_add = (360 * v + 128) >> 8;
+			int g_sub = ( 88 * u + 184 * v + 128) >> 8;
+			int b_add = (455 * u + 128) >> 8;
+			
 			/* 第一个RGB像素 */
-			r0 = Y0 + ((360 * (V1 - 128) + 128) >> 8);
-			clamp(&r0);
+			r0 = Y0 + r_add;
+			r0 = clamp(r0);
 
-			g0 = Y0 - (( 88 * (U0 - 128) + 184 * (V1 - 128) + 128) >> 8);
-			clamp(&g0);
+			g0 = Y0 - g_sub;
+			g0 = clamp(g0);
 
-			b0 = Y0 + ((455 * (U0 - 128) + 128) >> 8);
-			clamp(&b0);
+			b0 = Y0 + b_add;
+			b0 = clamp(b0);
 				
 			/* 第二个RGB像素 */
-			r1 = Y1 + ((360 * (V1 - 128) + 128) >> 8);
-			clamp(&r1);
+			r1 = Y1 + r_add;
+			r1 = clamp(r1);
 
-			g1 = Y1 - (( 88 * (U0 - 128) + 184 * (V1 - 128) + 128) >> 8);
-			clamp(&g1);
+			g1 = Y1 - g_sub;
+			g1 = clamp(g1);
 
-			b1 = Y1 + ((455 * (U0 - 128) + 128) >> 8);
-			clamp(&b1);
-						
-		}	
-		else 			
-		{						
+			b1 = Y1 + b_add;
+			b1 = clamp(b1);
+
+			/* 转换 */
+			rgbdata[0] =  r0;
+			rgbdata[1] =  g0;
+			rgbdata[2] =  b0;
+			
+			rgbdata[3] =  r1;
+			rgbdata[4] =  g1;
+			rgbdata[5] =  b1;
+			
+			yuyvdata += 4;
+			rgbdata += 6;
+		}
+					
+	}	
+
+	else 			
+	{			
+		for(i = 0 ; i < width * height/2 ; i++)
+		{
+			Y0 = yuyvdata[0];
+			U0 = yuyvdata[1];
+			Y1 = yuyvdata[2];
+			V1 = yuyvdata[3];
+			
+			int u = (U0 - 128);
+			int v = (V1 - 128);
+
+			int r_add = 409 * v + 128;
+			int g_sub = 100 * u + 208 * v - 128;
+			int b_add = 516 * u + 128;
+			
 			/* 第一个RGB像素 */
 			int c0 = 298 * (Y0 - 16);
 			
-			r0 = (c0 + 409 * (V1 - 128) + 128) >> 8;
-			clamp(&r0);
+			r0 = (c0 + r_add) >> 8;
+			r0 = clamp(r0);
 			
-			g0 = (c0 - 100 * (U0 - 128) - 208 * (V1 - 128) + 128) >> 8;
-			clamp(&g0);
+			g0 = (c0 - g_sub) >> 8;
+			g0 = clamp(g0);
 			
-			b0 = (c0 + 516 * (U0 - 128) + 128) >> 8;
-			clamp(&b0);
+			b0 = (c0 + b_add) >> 8;
+			b0 = clamp(b0);
 
 			/* 第二个RGB像素 */
 			int c1 = 298 * (Y1 - 16);
 			
-			r1 = (c1 + 409 * (V1 - 128) + 128) >> 8;
-			clamp(&r1);
+			r1 = (c1 + r_add) >> 8;
+			r1 = clamp(r1);
 			
-			g1 = (c1 - 100 * (U0 - 128) - 208 * (V1 - 128) + 128) >> 8;
-			clamp(&g1);
+			g1 = (c1 - g_sub) >> 8;
+			g1 = clamp(g1);
 			
-			b1 = (c1 + 516 * (U0 - 128) + 128) >> 8;
-			clamp(&b1);
+			b1 = (c1 + b_add) >> 8;
+			b1 = clamp(b1);
+
+			/* 转换 */
+			rgbdata[0] =  r0;
+			rgbdata[1] =  g0;
+			rgbdata[2] =  b0;
 			
+			rgbdata[3] =  r1;
+			rgbdata[4] =  g1;
+			rgbdata[5] =  b1;
+			
+			yuyvdata += 4;
+			rgbdata += 6;
 		}
 
-		/* 转换 */
-		rgbdata[i * 6 + 0] =  r0;
-		rgbdata[i * 6 + 1] =  g0;
-		rgbdata[i * 6 + 2] =  b0;
-		rgbdata[i * 6 + 3] =  r1;
-		rgbdata[i * 6 + 4] =  g1;
-		rgbdata[i * 6 + 5] =  b1;
-		
 	}
 	return 0;
 }
@@ -171,34 +206,34 @@ int rgb_to_yuyv(unsigned char* yuyvdata,unsigned char* rgbdata,int width,int hei
 		if(full)
 		{
 			Y0 = 0.299 * r0 +0.587 * g0 + 0.114 * b0;
-			clamp(&Y0);
+			Y0 = clamp(Y0);
 			U0 = -0.1687 * r0 - 0.3313 * g0 + 0.5 * b0 + 128;
-			clamp(&U0);
+			U0 = clamp(U0);
 			V0 = 0.5 * r0 - 0.4187 * g0 - 0.0813 * b0 +128;
-			clamp(&V0);
+			V0 = clamp(V0);
 
 			Y1 = 0.299 * r1 +0.587 * g1 + 0.114 * b1;
-			clamp(&Y1);
+			Y1 = clamp(Y1);
 			U1 = -0.1687 * r1 - 0.3313 * g1 + 0.5 * b1 + 128;
-			clamp(&U1);
+			U1 = clamp(U1);
 			V1 = 0.5 * r1 - 0.4187 * g1 - 0.0813 * b1 +128;
-			clamp(&V1);
+			V1 = clamp(V1);
 		}
 		else 
 		{
 			Y0 = 0.257 * r0 +0.504 * g0 + 0.098 * b0 + 16;
-			clamp(&Y0);
+			Y0 = clamp(Y0);
 			U0 = -0.1482 * r0 - 0.2910 * g0 + 0.4392 * b0 + 128;
-			clamp(&U0);
+			U0 = clamp(U0);
 			V0 = 0.4392 * r0 - 0.3678 * g0 - 0.0714 * b0 +128;
-			clamp(&V0);
+			V0 = clamp(V0);
 
 			Y1 = 0.257 * r1 +0.504 * g1 + 0.098 * b1 + 16;
-			clamp(&Y1);
+			Y1 = clamp(Y1);
 			U1 = -0.1482 * r1 - 0.2910 * g1 + 0.4392 * b1 + 128;
-			clamp(&U1);
+			U1 = clamp(U1);
 			V1 = 0.4392 * r1 - 0.3678 * g1 - 0.0714 * b1 +128;
-			clamp(&V1);
+			V1 = clamp(V1);
 		}
 
 		/* 转换 */
@@ -231,34 +266,34 @@ int rgb_to_yuyv_pair(unsigned char*yuyvdata,struct rgb rgb_0,struct rgb rgb_1,in
 	if(is_full)
 	{
 		Y0 = 0.299 * r0 +0.587 * g0 + 0.114 * b0;
-		clamp(&Y0);
+		Y0 = clamp(Y0);
 		U0 = -0.1687 * r0 - 0.3313 * g0 + 0.5 * b0 + 128;
-		clamp(&U0);
+		U0 = clamp(U0);
 		V0 = 0.5 * r0 - 0.4187 * g0 - 0.0813 * b0 +128;
-		clamp(&V0);
+		V0 = clamp(V0);
 
 		Y1 = 0.299 * r1 +0.587 * g1 + 0.114 * b1;
-		clamp(&Y1);
+		Y1 = clamp(Y1);
 		U1 = -0.1687 * r1 - 0.3313 * g1 + 0.5 * b1 + 128;
-		clamp(&U1);
+		U1 = clamp(U1);
 		V1 = 0.5 * r1 - 0.4187 * g1 - 0.0813 * b1 +128;
-		clamp(&V1);
+		V1 = clamp(V1);
 	}
 	else 
 	{
 		Y0 = 0.257 * r0 +0.504 * g0 + 0.098 * b0 + 16;
-		clamp(&Y0);
+		Y0 = clamp(Y0);
 		U0 = -0.1482 * r0 - 0.2910 * g0 + 0.4392 * b0 + 128;
-		clamp(&U0);
+		U0 = clamp(U0);
 		V0 = 0.4392 * r0 - 0.3678 * g0 - 0.0714 * b0 +128;
-		clamp(&V0);
+		V0 = clamp(V0);
 
 		Y1 = 0.257 * r1 +0.504 * g1 + 0.098 * b1 + 16;
-		clamp(&Y1);
+		Y1 = clamp(Y1);
 		U1 = -0.1482 * r1 - 0.2910 * g1 + 0.4392 * b1 + 128;
-		clamp(&U1);
+		U1 = clamp(U1);
 		V1 = 0.4392 * r1 - 0.3678 * g1 - 0.0714 * b1 +128;
-		clamp(&V1);
+		V1 = clamp(V1);
 	}
 	
 	/* 转换 */
