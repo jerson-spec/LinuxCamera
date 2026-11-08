@@ -117,6 +117,52 @@
  # [ Add double buffering downgrade ]——26_11_07
 
 - lcd初始化函数里如果成功分配了双缓冲空间，就置全局变量Is_lcd_doublebuffering为1，再创建一个函数int lcd_doublebuffering_on(void)在里面只做一件事——把这个全局变量返回去，这样test_camera_preview函数先调用该函数判断Is_lcd_doublebuffering的值，判断成功设置了双缓冲才执行下面的lcd_flip函数，否则降级为单缓冲：一方面由于draw_offset是全局变量，如果一开始lcd_init后Is_lcd_doublebuffering没被置为1，那执行到if(lcd_doublebuffering_on())直接跳出去，再下一轮lcd_put_pixel里pos = mem_addr + draw_offset + y * lcd_fix_screeninfo_t.line_length + x * lcd_var_screeninfo_t.bits_per_pixel / 8;，draw_offset为0，照常绘制，是单缓冲；另一方面如果一开始test_camera_preview里调用lcd_init后，lcd_init里确实把Is_lcd_doublebuffering置为1，返回来条件成立可以往下继续执行到下面的lcd_flip函数里执行ioctl FBIOPAN_DISPLAY，如果在这里失败，那就表明双缓冲切换失败，于是就去把Is_lcd_doublebuffering以及draw_offset都置为0，再返回-1，回test_camera_preview判断失败后直接continue，这样下轮循环以及之后就都不走if(lcd_doublebuffering_on())分支了，lcd_put_pixel依然照常绘制，draw_offset为0，是单缓冲；
+
 - 这里一开始我把全局变量变量名和int lcd_doublebuffering_on(void)函数函数名都取作lcd_doublebuffering_on，结果编译错误，所以不要把函数名和变量名取作一样；
+
 - 如上所述，最后一帧丢失、一开始黑帧：把lcd_flip放到lcd_put_pixel之后，另外不要夹在时间计算那一堆东西里，所以后面干脆放到了最后；在lcd_init最后把draw_offset 设为lcd_size（改lcd_flip里起始y_offset也行，但麻烦，还容易出错（变量赋值失败（左值？、右值？）），在lcd_init里加draw_offset起始绘制偏移最省事）；
+
 - 设置可变参数后要更新lcd_var_screeninfo_t和lcd_fix_screeninfo_t才能继续读变量值，一开始我以为设置可变参数后只需要更新lcd_var_screeninfo_t，判断一下lcd_var_screeninfo_t.yres_virtual是不是成功设置成等于两倍lcd_var_screeninfo_t.yres就够了，实际上接下来要读lcd_fix_screeninfo_t.smem_len的话也需要更新lcd_fix_screeninfo_t后才能读，原因是“在 Linux framebuffer 框架下，调用 `FBIOPUT_VSCREENINFO`（即 `PUT_VSCREENINFO`）**确实有可能改变** `fb_fix_screeninfo` 中的 `line_length` 和 `smem_len`，`fb_fix_screeninfo` 之所以被称为“固定”，**并非指这些值在整个系统生命周期内绝对不变**，而是指**应用程序不能直接指定或修改它们**。这些值由驱动程序根据硬件能力和当前选定的视频模式计算得出，对用户空间而言是**只读**的。”——更具体的解释见obsidian；
+
+  code -> git : 
+
+  ```
+   Add double buffering downgrade
+  ```
+
+  
+
+# [ lcd: fix flip state update ]——26_11_08
+
+- lcd_flip函数里如果ioctl失败，退出前置draw_offset为0有问题，假设退出时可见区设置在lcd_size那，那退出、下一轮降级为单缓冲时可见区没改过来画的一直没显示，就表现为lcd画面冻住了，这个问题我调试发现不了，因为我由双缓冲降级为单缓冲的办法是使lcd息屏/消影，所以降级为单缓冲后的画面我看不见，这里是让ai帮我审查代码时发现的，算是比较严重的一个问题，解决的办法是新增一个变量表示当前可见区，并在ioctl成功后才更新可见区和绘制区，这样如果ioctl失败，就把当前显示区返回为绘制区，以后单缓冲就继续在这片区域绘制，如果成功就正常走更新；这里我修改过一次没改对，更新应该是要放在icotl判断之后的，放在他之前，更新完，再判断，判断错误，把更新的值返回——这样相当于把没有成功更新的值返回，结果当然是出错的；
+
+- 另外还有一些不足之处也让ai帮审查代码是时发现，一是test_camera_preview.c里while循环里几次判断失败都只break，break后走清理，然后return 0，这和正常ctrl + c退出后走的路径一模一样，没有区分，显然不合理，于是根据建议我新建了一个变量exit_code(一开始是用ret，然后在程序最后判断ret < 0，成立的话表示出错，return -1，但是这样区分还不够)初始化为0，并在循环里每一处失败break前加exit_code = 某个负值，退出后把这个值打印出来，再return -1或者这个负值，如果一路不出错的话就正常走最后的 return 0；——另外在这个过程中我还顺带修改了一会fprintf(stderr,....,...)，一会LOG_ERROR，一会perror的风格不一致的问题，都统一为用LOG_ERROR；但是循环外的那些失败打印，然后清理，然后return -1，打印方式没有改，主要太多了，而且大多用的是fprintf(stderr,....,...),也算是统一的；
+
+- test_Get_images里之前修改过一次记录文件名的后缀的问题，但实际上只修改了一处还有一处没修改到，而且修改后后缀是.MJPEG/.MJPG和.YUYV，.MJPEG/.MJPG的情况还得改成.jpg，.YUYV的情况最好也改成.yuv，这样将来打开格式匹配更受支持，解决的办法很简单，就是做一个后缀判断，然后把判断结果设为.jpg和.yuv，然后再使用，即可；
+
+- poll timout那个分支也有点问题，polltimeout后continue而不是break，想继续等，没问题，但是如果一直等下去日志一直空打印，不好，于是加了个判断等待次数的变量，poll走到timeout三次，即打印错误，然后break；这里还有一个问题，就是应该还要在下面dqbuffer成功后把这个变量置为0，不置为0的话相当于是判断累计出现三次超时，而不是连续出现的三次超时，我们想要的是后者的效果，即等待你连续三次都是超时，就退出，所以在下面成功dqbuffer后把变量清为0；
+
+- 实验十分钟后得出一个实验结果，数据很好，VmRSS一直稳定在6324Kb一直没变过，内存没泄露；其他的fps、几项耗时也都和之前的实验结论类似，15fps，和0左右，三十几，三十几的值（ms）；另外dropped十分钟一直是0，零丢帧；DQbuf: 9036, Qbuf: 9036, Frames:9036，也都吻合；这里发现一个比较有意思的现象，就是明明我们在test_camera_preview.c里初始化了camera日志，然后下面lcd初始化，调用到lcd_init函数里的lcd日志初始化，两个日志都初始化了，但结果却是下面调用LOG_INFO、LOG_ERROR时信息全打印到lcd.log里了，而camera.log里是空的，原因看代码就能发现，后初始化的覆盖了先初始化的：log.c 的 `log_init()` 第一步就是：
+
+  ```
+  if (g_fp) { fclose(g_fp); g_fp = NULL; }   // 把 camera.log 关掉
+  g_fp = fopen(path, "a");                    // 换成 lcd.log
+  ```
+
+​	 所以 `lcd_init` 一返回，全局 `g_fp` 就指向 `lcd.log` 了，之后所有 `LOG_*` 都只写 `lcd.log`。`camera.log` 会被创建（`fopen` 的 `"a"` 模式），但里面基本是	空的；
+
+- code -> git : 
+
+  ```
+   lcd: fix flip state update
+  - lcd_flip: only update visible/draw offset after FBIOPAN_DISPLAY succeeds
+  - test_camera_preview: per-stage exit codes, poll-timeout guard, VmRSS in stats
+  - test_Get_images: log file name with actual format
+  ```
+
+  
+
+
+
+
+

@@ -1,6 +1,6 @@
 # 架构说明
 
-> 当前状态：**v0.1 Camera Preview**（摄像头 YUYV 单帧 → LCD）。
+> 当前状态：**v0.5 Continuous Preview**（连续预览 + 双缓冲 + FPS）。
 >
 > 本文描述当前真实代码结构，不描述理想中的最终架构。
 > 新会话请先读 `docs/handoff.md`，再读本文。
@@ -22,8 +22,6 @@ V4L2 采集 → YUYV 转换 → LCD 显示 → 拍照/存卡 → 网络推流
 ```text
 摄像头 YUYV 单帧 → yuyv_to_rgb() → lcd_put_pixel() → /dev/fb0
 ```
-
-下一步：
 
 ```text
 连续预览 + 双缓冲 + FPS
@@ -52,22 +50,24 @@ V4L2 MMAP 采集
 tests/manual/test_Get_images.c
 ```
 
-### 2.2 单帧摄像头预览（v0.1）
+### 2.2 摄像头预览（v0.1 单帧 → v0.5 循环）
 
 ```text
 open video
   → QUERYCAP
   → S_FMT(YUYV, 请求 1024×600)
   → 驱动实际返回 800×600
-  → REQBUFS
+  → REQBUFS(4)
   → mmap
   → QBUF × 4
   → STREAMON
-  → poll
-  → DQBUF
+  → poll(2000ms) → DQBUF
   → yuyv_to_rgb()
-  → lcd_put_pixel()
-  → QBUF
+  → QBUF（尽早归还）
+  → lcd_put_pixel() × 480k
+  → lcd_flip()（FBIOPAN_DISPLAY）
+  → 每秒统计 fps/wait/conv/draw/dropped/rss
+  → 循环直到 Ctrl-C
   → STREAMOFF
   → munmap
 ```
@@ -195,7 +195,7 @@ src/config.c
 camera / storage / log / lcd / lcd_log / trans
 ```
 
-这是当前技术债，但**v0.5 前不拆分**。
+这是当前技术债。
 
 ### 5.2 `log`
 
@@ -262,6 +262,8 @@ API：
 int  lcd_init(char *lcd_cfg_path, app_config_t *lcd_cfg_p);
 int  lcd_deinit(void);
 int  lcd_put_pixel(unsigned int x, unsigned int y, unsigned int color);
+int  lcd_flip(void);                 /* FBIOPAN_DISPLAY 切页 */
+int  lcd_doublebuffering_on(void);
 void Get_lcd_parameters(struct fb_fix_screeninfo *fix,
                         struct fb_var_screeninfo *var);
 ```
@@ -271,16 +273,18 @@ void Get_lcd_parameters(struct fb_fix_screeninfo *fix,
 - 读 lcd.ini；
 - open `/dev/fb0`；
 - `FBIOGET_FSCREENINFO` / `FBIOGET_VSCREENINFO`；
+- 设 `yres_virtual = 2 * yres`，PUT 后回读校验；
 - `mmap`；
 - 16bpp RGB565 / 32bpp 写像素；
+- `lcd_flip()` 切前后台缓冲，pan 失败自动降级；
 - `lcd_deinit()` 清理。
 
 限制：
 
-- 全局 `mem_addr`、`lcd_fix_screeninfo_t`、`lcd_var_screeninfo_t`；
+- 全局 `mem_addr`、`lcd_fix_screeninfo_t`、`lcd_var_screeninfo_t`、`draw_offset`；
 - `lcd_deinit()` 先 close 再 munmap，并关闭日志；
 - 错误路径清理不完整；
-- 逐像素函数调用，性能不适合高帧率。
+- 逐像素函数调用，性能不适合高帧率（480k 次/帧，约 30 ms）。
 
 ### 5.5 `tests/manual`
 
@@ -317,7 +321,7 @@ config_test          # 配置测试
 6. 日志自己写，不引入 spdlog/zlog；
 7. 先单帧，后连续；先单缓冲，后双缓冲；
 8. 不提前做 Qt/LVGL/MQTT/RTSP；
-9. `app_config_t` 暂不拆分，等 v0.5 稳定后再处理。
+9. `app_config_t` 暂不拆分。
 
 ---
 
@@ -325,48 +329,48 @@ config_test          # 配置测试
 
 按优先级：
 
-1. 只有单帧预览，没有连续循环；
-2. 没有双缓冲，连续预览会撕裂；
-3. `lcd_put_pixel()` 逐像素，性能不足；
-4. `yuyv_to_rgb()` 没有 stride 参数；
-5. `yuyv.c` 全局 `full` 状态；
-6. `lcd.c` 全局状态 + 日志生命周期耦合；
-7. `test_Get_images` 对 YUYV 仍使用 `.jpg`；
-8. `app_config_t` 过大；
-9. 配置路径分散，安装后的 `/etc/...` 未接入；
+1. `lcd_put_pixel()` 逐像素，480k 次/帧约 30 ms，CPU 余量只剩约 2%；
+2. `yuyv_to_rgb()` 浮点 + 没有 stride 参数；
+3. `yuyv.c` 全局 `full` 状态；
+4. `lcd.c` 全局状态；`lcd_init()` 重置日志、`lcd_deinit()` 关闭日志；
+5. `test_Get_images` 文件名直接拼格式名（`.MJPG` / `.YUYV`）；
+6. `test_camera_preview.c` 550+ 行，承担主程序职责；
+7. `app_config_t` 过大；
+8. 配置路径分散，`lcd_init()` 会重复 load `lcd.ini`；
+9. 首帧延迟 1–1.6 s；
 10. 没有单元测试/CI；
-11. `scripts/` 当前不可直接执行。
 
 ---
 
 ## 8. 下一步架构演进
 
-### v0.5 连续预览
+### W3：先优化，再加功能
 
 ```text
-test_camera_preview
-  → while (running)
-      poll
-      DQBUF
-      yuyv_to_rgb
-      QBUF
-      display
-      FPS
+现状：conv 35.1 ms + draw 30.6 ms = 65.7 ms / 66.7 ms（CPU 98%）
+
+第 1 刀：定点化 YUYV→RGB
+  conv 35.1 → 目标 <15 ms
+
+第 2 刀：融合转换与上屏、按行写
+  draw 30.6 → 目标 <8 ms
+  顺带去掉 1.4 MB 的 RGB888 中间 buffer
+
+验收：单帧 <25 ms；800×600 仍 15fps；640×480 能跑满 30fps
 ```
 
 注意：
 
-- `QBUF` 要尽早；
-- 先单缓冲跑通，再加双缓冲；
-- 用 `FBIOPAN_DISPLAY` 切页；
-- 测 `capture_ms` / `convert_ms` / `display_ms`；
-- 性能不够时，先优化转换和显示，不要急着换板子。
+- 优化不会提高 800×600 的 fps（摄像头锁死 15），收益是 CPU 余量和 640×480@30；
+- 一次只改一刀，改完上板对比三段时间；
+- 不要急着换板子。
 
 ### v1.0 前
 
 - 把 V4L2 采集抽到 `src/camera.c`；
 - 把显示循环抽到 `src/display.c`；
 - `src/main.c` 只负责编排；
+- 日志只在 main 初始化一次，`lcd.c` 不再碰日志；
 - 再考虑拆 `app_config_t`；
 - 加 letterbox/缩放；
 - 加触摸/OSD/JPEG。
@@ -379,4 +383,3 @@ test_camera_preview
 - 每次只改一个变量；
 - 不为了“看起来专业”提前抽象；
 - 不继续把生产代码写进测试文件；
-- 不在 v0.5 前拆分 `app_config_t`。

@@ -19,25 +19,27 @@
 | 项目 | 当前值 |
 |---|---|
 | 项目 | i.MX6ULL Linux 相机 |
-| 当前阶段 | **v0.1 Camera Preview 已完成** |
+| 当前阶段 | **v0.5 Continuous Preview 已完成（604 s 稳定验证）** |
 | 语言 | C |
-| 采集 | V4L2 MMAP |
-| 显示 | `/dev/fb0` framebuffer |
+| 采集 | V4L2 MMAP（4 buffer，poll 超时 2 s） |
+| 显示 | `/dev/fb0` framebuffer + 双缓冲 |
 | 摄像头 | `/dev/video1` |
 | 摄像头请求 | 1024×600 YUYV |
-| 摄像头实际 | **800×600 YUYV**（驱动调整） |
+| 摄像头实际 | **800×600 YUYV**（驱动调整，15 fps 上限） |
 | `bytesperline` | **1600 = 800×2** |
-| LCD | **1024×600** |
+| LCD | **1024×600，32bpp，`line_length = 4096`** |
+| 双缓冲 | `yres_virtual = 1200`，`FBIOPAN_DISPLAY`，失败自动降级 |
 | 显示结果 | 左上角 800×600，右侧 224 像素黑色 |
+| 实测 | 15.0 fps，conv 35.1 ms，draw 30.6 ms，0 丢帧，VmRSS 6324 kB |
 | 工具链 | 100ask Buildroot SDK |
 | 连接 | ADB，无板子 IP |
-| 当前标签建议 | `v0.1` / `v0.1-camera-preview` |
-| 下一步 | **v0.5 连续预览 + 双缓冲 + FPS** |
-| 当前不是 | v0.5、v1.0 |
+| 当前标签 | `v0.1` 已打；`v0.5` 待打 |
+| 下一步 | **W3：定点化 + 按行写，优化 CPU 余量** |
+| 当前不是 | v1.0 |
 
 一句话：
 
-> **摄像头 YUYV 单帧已经能显示到 LCD；下一步是连续预览。右侧黑边是分辨率不匹配，不是 bug。**
+> **画面已经连续、双缓冲、10 分钟 0 丢帧；15 fps 是摄像头上限，下一步是把 66 ms/帧压下来换余量。**
 
 ---
 
@@ -166,29 +168,29 @@ LinuxCamera/
 - LCD framebuffer 打开/mmap/画像素；
 - YUYV → RGB（FULL/LIMIT）；
 - 合成 YUYV 色条上屏；
-- **摄像头 YUYV 单帧 → RGB → LCD（v0.1）**。
+- **摄像头 YUYV 单帧 → RGB → LCD（v0.1）**；
+- **连续预览 + 每秒 FPS/耗时/丢帧/VmRSS 统计（v0.5）**；
+- **双缓冲：`FBIOPAN_DISPLAY` 切页，pan 失败自动降级单缓冲（v0.5）**。
 
 ### 2.3 还没做的功能
 
-- 连续预览；
-- 双缓冲；
-- FPS；
-- letterbox/缩放；
+- 多分辨率/letterbox；
 - 触摸/按键；
 - OSD；
 - libjpeg 拍照存卡；
 - 网络推流；
 - 8 小时稳定性；
-- 单元测试/CI。
+- 单元测试/CI；
+- 性能优化（定点化/按行写，W3）。
 
 ### 2.4 各程序状态
 
 | 程序 | 状态 | 作用 |
 |---|---|---|
-| `test_Get_images` | ✅ | 采集/枚举/保存 JPEG |
+| `test_Get_images` | ✅ | 采集/枚举/保存 JPEG（文件名用格式名作后缀） |
 | `test_Draw_region` | ✅ | LCD 参数 + 区域绘制 |
 | `test_Trans_YUYV` | ✅ | 合成 YUYV 色条 → RGB → LCD |
-| `test_camera_preview` | ✅ | 摄像头 YUYV 单帧 → LCD |
+| `test_camera_preview` | ✅ | **v0.5 主程序**：连续预览 + 双缓冲 + 统计 |
 | `config_test` | ✅ | 配置读取/打印 |
 | `camera` | ✅ 可编译 | 当前只是配置检查占位，不是正式主程序 |
 
@@ -359,6 +361,8 @@ API：
 int  lcd_init(char *lcd_cfg_path, app_config_t *lcd_cfg_p);
 int  lcd_deinit(void);
 int  lcd_put_pixel(unsigned int x, unsigned int y, unsigned int color);
+int  lcd_flip(void);                 /* 切前后台缓冲，成功 0 / 失败 -1 */
+int  lcd_doublebuffering_on(void);   /* 1 = 双缓冲已启用 */
 void Get_lcd_parameters(struct fb_fix_screeninfo *fix,
                         struct fb_var_screeninfo *var);
 ```
@@ -366,9 +370,11 @@ void Get_lcd_parameters(struct fb_fix_screeninfo *fix,
 - 读 lcd.ini；
 - open `/dev/fb0`；
 - ioctl fix/var；
-- mmap；
+- `FBIOPUT_VSCREENINFO` 设 `yres_virtual = 2 * yres` 并回读校验；
+- mmap（32 MB 预留区）；
 - 16bpp RGB565 / 32bpp；
-- 全局 `mem_addr` / fix / var。
+- `lcd_flip()` 用 `FBIOPAN_DISPLAY` 切页，失败自动降级；
+- 全局 `mem_addr` / fix / var / `draw_offset`。
 
 ### 4.5 `yuyv`
 
@@ -453,7 +459,7 @@ lcd_deinit
 
 ---
 
-## 6. 当前最重要的任务：v0.5 连续预览
+## 6. v0.5 连续预览（已完成）
 
 ### 6.1 目标
 
@@ -502,13 +508,13 @@ display_ms
 - 按行写；
 - 减少中间 RGB888 buffer。
 
-### 6.5 验收
+### 6.5 验收（已全部通过，2026-11-08）
 
-- [ ] 连续 10 分钟不崩；
-- [ ] FPS 可打印；
-- [ ] 无内存增长；
-- [ ] Ctrl-C 干净退出；
-- [ ] 双缓冲可用。
+- [x] 连续 10 分钟不崩（604 s / 9036 帧）；
+- [x] FPS 可打印（15.0）；
+- [x] 无内存增长（VmRSS 6324 kB 恒定）；
+- [x] Ctrl-C 干净退出；
+- [x] 双缓冲可用（`FBIOPAN_DISPLAY` 全程无错误，blank 后可复现失败并降级）。
 
 ---
 
@@ -536,18 +542,18 @@ display_ms
 
 按优先级：
 
-1. 只有单帧，没有连续循环；
-2. 没有双缓冲；
-3. `lcd_put_pixel()` 逐像素，性能不足；
-4. `yuyv_to_rgb()` 没有 stride；
-5. `yuyv.c` 全局 `full`；
-6. `lcd.c` 全局状态 + 日志生命周期耦合；
-7. `test_Get_images` 对 YUYV 仍用 `.jpg`；
-8. `app_config_t` 过大；
-9. 配置路径分散；
-10. `scripts/` 不可直接执行；
+1. `lcd_put_pixel()` 逐像素调用（480k 次/帧，约 30 ms），CPU 忙占比约 98%；
+2. `yuyv_to_rgb()` 浮点 + 没有 stride；
+3. `yuyv.c` 全局 `full`；
+4. `lcd.c` 全局状态；`lcd_init()` 重置日志、`lcd_deinit()` 关闭日志（所以 `camera.log` 基本为空）；
+5. `test_camera_preview.c` 已 550+ 行，承担主程序职责，v1.0 前要拆；
+6. `test_Get_images` 文件名直接拼格式名（`.MJPG` / `.YUYV`）；
+7. `app_config_t` 过大；
+8. 配置路径分散，`lcd_init` 会重复 load `lcd.ini`；
+9. `src/main.c` 仍是占位程序；
+10. 首帧延迟 1–1.6 s；
 11. 无单元测试/CI；
-12. `README` 已更新，但以 docs 为准。
+12. `scripts/` 未纳入主流程。
 
 ---
 
@@ -594,8 +600,8 @@ cmake -S . -B build-arm \
 cmake --build build-arm -j"$(nproc)"
 ```
 
-7. 上板验证现有程序；
-8. 再开始 v0.5。
+7. 上板跑 30 秒，确认 15fps、`DQbuf == Qbuf == Frames`、无 ERROR；
+8. 再开始 W3（优化）或 v1.0（功能）。
 
 ---
 
@@ -640,4 +646,4 @@ adb forward tcp:1234 tcp:1234
 
 ## 14. 最后一句
 
-> **v0.1 已完成；下一步是让画面连续动起来，而不是继续修黑边。**
+> **v0.5 已完成：连续、双缓冲、10 分钟 0 丢帧；下一步是把它跑得更省。**

@@ -3,7 +3,7 @@
 > 本文记录当前开发板、设备节点、工具链、构建、部署和调试方式。
 > 如果换了板子、SDK 或摄像头，先更新本文。
 >
-> 当前阶段：v0.1 Camera Preview。
+> 当前阶段：v0.5 Continuous Preview。
 
 ---
 
@@ -90,6 +90,19 @@ cat /sys/class/graphics/fb0/virtual_size
 - 32bpp：按 `0x00RRGGBB` 写入。
 
 如果颜色不对，先检查 `red/green/blue offset` 和 RGB/BGR。
+
+当前实测（2026-11-08）：
+
+- `bits_per_pixel = 32`，`line_length = 4096`；
+- 可见区 1024×600，一屏约 2.4 MB（1024×600×4）；
+- `smem_len = 32 MB`，是 BSP 预留的整块显存，**不等于**两屏；
+  `yres_virtual` 只描述“这块内存怎么用”，不会重新分配；
+- 程序会把 `yres_virtual` 设为 1200，并用 `FBIOPAN_DISPLAY` 切前后台。
+
+注意：`echo 1 > /sys/class/graphics/fb0/blank` 之后，`FBIOPAN_DISPLAY` 会失败并返回
+`-EPERM`（内核 `fb_pan_display()` 在非 RUNNING 状态直接拒绝），日志里会出现交替的
+`yoffset: 0 / 600` 错误——这是**预期现象**，也正好证明 flip 在每帧切换。
+`echo 0 > blank` 恢复后，建议重启程序。
 
 ---
 
@@ -229,20 +242,40 @@ adb push build-arm-dbg/test_camera_preview /root/LinuxCamera/test_camera_preview
 ./test_Trans_YUYV
 ```
 
-### 6.5 摄像头单帧预览（v0.1）
+### 6.5 摄像头连续预览（v0.5）
 
 ```bash
 ./test_camera_preview
 ```
 
-当前 `lcd.ini` 的 `display_time=300`，会保持 5 分钟；测试时改成 5 秒。
-
 预期：
 
-- 摄像头实际 800×600；
-- LCD 1024×600；
-- 左上角显示画面；
-- 右侧黑边。
+- 摄像头实际 800×600，LCD 1024×600，左上角画面 + 右侧黑边；
+- 每秒打印一行：
+  `fps: 15.0, wait: 0.7, conv: 35.1, draw: 30.6, dropped: 0, rss: 6324 kB`；
+- 按 Ctrl-C 干净退出，收尾打印 `DQbuf = Qbuf = Frames`。
+
+`lcd.ini` 的 `display_time` 从 v0.5 起不再使用（循环由 Ctrl-C 结束）。
+
+### 6.6 10 分钟稳定性测试
+
+```bash
+# 终端 A
+./test_camera_preview
+
+# 终端 B：每 60 秒记一次内存
+while true; do
+    grep VmRSS /proc/$(pidof test_camera_preview)/status
+    sleep 60
+done
+```
+
+通过标准（2026-11-08 实测）：
+
+- 604 s / 9036 帧 / 平均 14.96 fps；
+- `dropped` 不随时间增长（本轮为 0）；
+- `VmRSS` 6324 kB 恒定；
+- 退出时 `DQbuf == Qbuf == Frames`。
 
 ---
 
@@ -313,6 +346,8 @@ p lcd_var_screeninfo_t
 | 画面斜/花 | `bytesperline`/stride 不匹配 | 打印 `bytesperline` |
 | 画面绿/雪花 | 把 MJPEG 当 YUYV | 检查 `S_FMT` 实际格式 |
 | 右侧黑边 | 摄像头宽度 < LCD 宽度 | 1:1 显示正常；缩放留 v1.0 |
+| `FBIOPAN_DISPLAY` 报错 | fb 被 blank，或驱动不支持 pan | `cat /sys/class/graphics/fb0/blank`；`echo 0 > blank` 或让程序降级 |
+| `camera.log` 是空的 | `lcd_init()` 把日志重定向到了 `lcd.log` | 看 `lcd.log` |
 | 程序跑完 gdb 断开 | 程序正常退出 | 重启 gdbserver |
 
 ---
@@ -320,8 +355,15 @@ p lcd_var_screeninfo_t
 ## 9. 当前限制
 
 - 板子没有 IP，gdb 走 ADB；
+
 - 摄像头实际 800×600，LCD 1024×600，右侧黑边正常；
-- 只有单帧预览，没有连续循环；
-- `lcd_put_pixel()` 逐像素，性能不足；
-- 没有双缓冲/letterbox/触摸/OSD；
-- `scripts/` 当前不能直接执行，以本文命令为准。
+
+- 15 fps 是摄像头在 800×600 YUYV 下的上限；
+
+- `lcd_put_pixel()` 逐像素，约 30 ms/帧，CPU 忙占比约 98%；
+
+- 已支持双缓冲；没有 letterbox/缩放/触摸/OSD/网络；
+
+- 首帧延迟 1–1.6 s（摄像头启动 + 曝光收敛）；
+
+  

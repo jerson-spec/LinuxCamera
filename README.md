@@ -2,20 +2,20 @@
 
 基于 i.MX6ULL + Linux V4L2 的相机项目。
 
-> **当前状态：v0.1 Camera Preview（单帧摄像头预览）**
+> **当前状态：v0.5 Continuous Preview（连续预览 + 双缓冲 + FPS）**
 >
 > 已实现：
 > - V4L2 MMAP 采集、格式/分辨率枚举、MJPEG 保存 JPEG
 > - ini 配置、分级日志、CMake 交叉编译、gdbserver 调试
-> - LCD framebuffer 打开、mmap、RGB565 画像素
+> - LCD framebuffer 打开、mmap、16bpp/32bpp 画像素
 > - YUYV → RGB（FULL / LIMIT）
 > - 合成 YUYV 色条上屏
-> - **摄像头 YUYV 单帧 → RGB → LCD**
+> - 摄像头 YUYV 单帧 → RGB → LCD（v0.1）
+> - **连续预览 + 双缓冲（FBIOPAN_DISPLAY）+ 每秒 FPS/耗时/丢帧/内存统计（v0.5）**
 >
 > 尚未实现：
-> - 连续预览、双缓冲、FPS
-> - letterbox / 缩放
-> - 触摸拍照、OSD
+> - letterbox / 缩放、多分辨率
+> - 触摸拍照、JPEG 存卡、OSD
 > - 网络推流
 > - 8 小时稳定性
 >
@@ -56,9 +56,10 @@
 | gdbserver + ADB 端口转发 | ✅ 基本流程已验证 |
 | LCD framebuffer 打开、mmap、画像素 | ✅ 已实现 |
 | YUYV → RGB（FULL/LIMIT） | ✅ 已验证 |
-| RGB565 写入（16bpp） | ✅ 已验证 |
+| RGB565（16bpp）/ XRGB8888（32bpp）写像素 | ✅ 已验证 |
 | 摄像头 YUYV 单帧 → LCD | ✅ v0.1 已验证 |
-| 连续预览 / 双缓冲 / FPS | ❌ 下一步 |
+| 连续预览 + 双缓冲（`FBIOPAN_DISPLAY`） | ✅ v0.5 已验证 |
+| FPS / 耗时 / 丢帧 / VmRSS 统计 | ✅ v0.5 已验证 |
 | letterbox / 缩放 | ❌ 未实现 |
 | 触摸/按键拍照 | ❌ 未实现 |
 | OSD | ❌ 未实现 |
@@ -79,11 +80,27 @@
 - 显示结果：画面显示在左上角 800×600，右侧 224 像素为黑色
 - 这个黑边是**分辨率/宽高比不匹配**，不是 bug；v0.1 接受 1:1 显示
 
-已验证：
+已验证（v0.1）：
 
 - YUYV 色条 FULL / LIMIT 均正常；
 - 摄像头 YUYV 单帧可显示到 LCD；
 - 程序能正常退出，无段错误。
+
+已验证（v0.5，连续 10 分钟，2026-11-08）：
+
+| 指标 | 实测 |
+|---|---|
+| 时长 / 帧数 | 604 s / 9036 帧 |
+| 平均 fps | 14.96（稳态 15.0） |
+| wait（poll + DQBUF） | 0.7 ms |
+| conv（YUYV → RGB888） | 35.1 ms |
+| draw（480k 次 `lcd_put_pixel`） | 30.6 ms |
+| dropped | 0 |
+| VmRSS | 6324 kB，全程不变 |
+| 收尾 | DQbuf = Qbuf = Frames = 9036 |
+
+结论：15 fps 是摄像头在 800×600 YUYV 下的上限（`v4l2-ctl --list-formats-ext`
+只给出 15/10/5 三档），不是代码限制；程序约 66 ms/帧，CPU 忙占比约 98%，余量很小。
 
 ---
 
@@ -119,6 +136,26 @@ lcd_put_pixel()
   ▼
 /dev/fb0
 ```
+
+### 连续预览（v0.5）
+
+```text
+while (!g_stop)
+    poll(2000ms)
+      → DQBUF
+      → yuyv_to_rgb()            [conv]
+      → QBUF（尽早归还，驱动继续采）
+      → lcd_put_pixel() × 480k   [draw]
+      → lcd_flip()               FBIOPAN_DISPLAY 切前后台
+      → 每秒统计 fps / wait / conv / draw / dropped / VmRSS
+```
+
+双缓冲要点：
+
+- `FBIOPUT_VSCREENINFO` 把 `yres_virtual` 设为 `2 × yres`；
+- 一屏 1024×600×4 B（32bpp，`line_length = 4096`），两块共约 4.9 MB；
+- 只画后台，画完 `FBIOPAN_DISPLAY` 切到前台；
+- pan 失败会自动降级为单缓冲并继续运行。
 
 ---
 
@@ -364,7 +401,6 @@ log_file=./camera.log
 - 当前摄像头请求 `1024×600`，实际返回 `800×600`；
 - 代码会在日志/终端提示实际分辨率；
 - `test_camera_preview` 不使用 `flag`；
-- `test_Get_images` 当前对 YUYV 仍保存 `.jpg`，只验证 MJPEG 保存。
 
 ### `config/lcd.ini`
 
@@ -588,34 +624,34 @@ p lcd_var_screeninfo_t
 ## 已知限制
 
 1. 摄像头实际只输出 800×600，LCD 1024×600，右侧黑边是正常 1:1 显示；
-2. 只有单帧预览，没有连续循环；
-3. 没有双缓冲，连续预览会撕裂；
-4. `lcd_put_pixel()` 逐像素调用，性能不适合高帧率；
-5. `yuyv_to_rgb()` 没有 `src_stride` 参数，当前仅支持 `bytesperline == width*2`；
-6. `yuyv.c` 使用全局 `full` 状态，依赖先调用 `Is_full_range()`；
-7. `test_Get_images` 对 YUYV 仍使用 `.jpg` 后缀；
-8. `app_config_t` 同时包含 camera/lcd/log/trans，偏大；
-9. `lcd.c` 使用全局状态，`lcd_deinit()` 与日志生命周期耦合；
-10. 没有 letterbox/缩放/触摸/OSD/网络；
+2. 15 fps 是摄像头在 800×600 YUYV 下的上限；程序约 66 ms/帧，CPU 忙占比约 98%，余量很小；
+3. `lcd_put_pixel()` 逐像素调用（480k 次/帧，约 30 ms），是下一步优化目标；
+4. `yuyv_to_rgb()` 没有 `src_stride` 参数，当前仅支持 `bytesperline == width*2`；
+5. `yuyv.c` 使用全局 `full` 状态，依赖先调用 `Is_full_range()`；
+6. `app_config_t` 同时包含 camera/lcd/log/trans，偏大；
+7. `lcd_init()` 会把日志重定向到 `lcd.log`，`lcd_deinit()` 会关闭日志，所以 `camera.log` 基本是空的；
+8. 首帧延迟约 1–1.6 s（摄像头启动 + 曝光收敛），会影响 v1.0 的"3 秒出图"；
+9. 没有 letterbox/缩放/触摸/OSD/网络；
 11. 没有单元测试/CI；
 
 ---
 
 ## Roadmap
 
-### v0.1（当前）
+### v0.1
 
 - [x] V4L2 YUYV 采集
 - [x] YUYV → RGB
 - [x] LCD 单帧显示
 - [x] 实际 800×600，左上角 1:1 显示
+- [x] tag `v0.1`
 
-### v0.5
+### v0.5（当前）
 
-- [ ] 连续预览
-- [ ] 双缓冲 + `FBIOPAN_DISPLAY`
-- [ ] FPS 统计
-- [ ] 10 分钟不崩
+- [x] 连续预览
+- [x] 双缓冲 + `FBIOPAN_DISPLAY`
+- [x] FPS / 耗时 / 丢帧 / VmRSS 统计
+- [x] 10 分钟不崩（604 s，9036 帧，0 丢帧）
 
 ### v1.0
 
@@ -639,6 +675,7 @@ p lcd_var_screeninfo_t
 
 ## 第三方组件与 License
 
+- 本项目自身：**MIT License**，见根目录 `LICENSE.txt`。
 - [inih](https://github.com/benhoyt/inih)：BSD-3-Clause，见 `third_party/inih/LICENSE.txt`。
 - 100ask i.MX6ULL SDK / 开发板资料：遵循其原始许可。
 
