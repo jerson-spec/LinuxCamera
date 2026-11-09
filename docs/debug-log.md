@@ -161,8 +161,63 @@
   ```
 
   
+  
+# [ yuyv: integer fixed-point YUYV->RGB (conv 35.1 -> 25.9 ms) ]——26_11_08
+
+- 解决完双缓冲降级后屏幕固定为残留帧，不显示单缓冲实时摄像头画面的问题，下一步解决延迟，也就是现在差不多是fps: 15.0, wait:0.3, conv: 35.1, draw: 31.2, dropped: 0, rss: 6384 kB这种情况，可以看到wait接近于0，我们的处理紧跟摄像头拍摄的节拍，cpu没有余量了，下一步我们要新增各种功能必须要先把这个问题给解决，把conv和draw的时间都降低，这样wait的时间扩大，cpu有余量，能休息；
+
+- 针对conv的处理首先是把浮点数运算替换为整数和移位运算，比如说`r0 = Y0 + 1.4075 * (V1 - 128);`，`1.4075×256=360.32≈360`，我们把他转为`r0 = Y0 + ((360 * (V1 - 128) + 128) >> 8);`，这里的：`+128 >> 8`起近似、四舍五入的作用；这样处理后采一分钟数，conv从35.1降到25.9附近，wait值对应提升一些；
+
+  code -> git : 
+
+  ```
+  yuyv: integer fixed-point YUYV->RGB (conv 35.1 -> 25.9 ms)
+  ```
+  
+  
+# [ yuyv: hoist chroma terms per pixel pair, inline clamp, drop memcpy (conv 25.9 -> 14 ms) ]——26_11_08
+
+- 不过这样还不够，我进一步做了以下改变：一是把涉及到U、V的计算都用一个变量表示出来，这样下面都可以复用不用重复算，另外Y0、Y1两个像素重复计算的部分也可以用变量记下来，之后下面都直接代这个变量计算，这样两步能节省掉很多重复的计算；二是for循环里不做full的判断，这样每次循环都要判断一次条件，没必要，把他改为先判断full，走不同分支，再进for循环；三是直接引用yuyvbuffer里的值，处理完后在结尾把yuyvbuffer加4即可，这样不用每次memcpy，又节省了时间；四是clamp函数的调用，改成static inline类型，**表示该函数既是“文件内可见的静态函数”，又是“建议编译器在调用处内联展开的函数”，从而减少调用开销并避免多文件重定义问题**；——另外我一开始想的是在上一步整数定点运算的基础上再进一步，进到把剩余的整数乘法运算扩展为移位运算，但是容易出错，并且后面查询发现这样的做法并不能加快运算速度，反而会拖慢......“`360 * x` 拆成 `(x<<8) + (x<<6) + (x<<5) + (x<<3)` 是 **4 条指令**；而 Cortex-A7 的整数乘法器 1 个周期就能算完 `360 * x`，是 **1 条指令**。用移位代替常系数乘法是 8 位单片机时代的习惯，在 A7 上是倒退。“
+
+- 上机实验，发现一个有意思的现象，conv是从25左右降到18左右，wait相应增长了一些，但是draw反而提升了三到四，究其原因，和cpu调频有关：6ULL 默认 ondemand 调频，conv 变快以后，每帧空出来的 wait 变多，CPU 有空降频，下一段 draw 可能就跑在低频率上——这能同时解释"conv 变快、draw 变慢、两个数都开始抖“，解决办法是执行
+
+ ```
+  cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors #查看 CPU0 当前内核支持的 governor 列表
+  cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq			  #查看 CPU0 当前的实时运行频率
+  
+  echo performance > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor	#将 CPU0 的调频策略切换为 performance ，始终把 CPU0 锁定																			 #在最高频率
+  ./test_camera_preview          													
+  
+  echo ondemand > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor   # 测完还原
+ ```
+​	命令锁频；这样操作之后再测，fps: 15.0, wait: 21.7, conv: 14.0, draw: 30.9, dropped: 0, rss: 6384 kB，一直保持在这附近，十分稳定，下一步就是把draw的耗时也给拉下来；
+
+code -> git : 
+
+```
+yuyv: hoist chroma terms per pixel pair, inline clamp, drop memcpy (conv 25.9 -> 14 ms)
+```
 
 
+
+# [ lcd: add row-based RGB888 blit (draw 30.9 ->  8.6 ms) ]——26_11_09
+
+- 原来是按像素写，两层for循环，现在改成一次写一行，lcd_write_line_rgb888里直接把某一行所有字节按r,g,b顺序三位三位的提取出来合成这width个像素，然后直接拷到pos位置，即画出来，减少了绘制时间；这里一个问题我没注意到，上机实验发现一直段错误，就是外部test_camera_preview.c文件调用lcd_write_line_rgb888函数时for(i = 0 ; i < h ; i++ )，之后ret = lcd_write_line_rgb888(i, rgbbuf ，w);并在最后我是让 rgbbuf +=  w * 3;，这样是不对的，相当于把rgbbuf移走了，这样只第一次绘制第一行是对的，后面全都错了，直接段错误，正确的方法是别移动rgbbuf，删掉对rgbbuf的操作，把参数改成ret =lcd_write_line_rgb888(i, rgbbuf + (size_t)i * 3 * (size_t)w, w);只这一个小小的改动，即可；
+- 另外我发现  `rm` 命令会直接永久删除文件，不会进入回收站；
+
+- 这样改过来以后上机实验，如果还有一些语法错误按照编译提示对应改过来即可，这里不赘述，全部修改完毕，实验结果draw有很大改善，fps: 15.0, wait: 43.1, conv: 14.1, draw: 8.6, dropped: 0, rss: 6064 kB，稳定在这附近；
+
+  code -> git : 
+
+  ```
+  lcd: add row-based RGB888 blit (draw 30.9 -> 8.6 ms)
+  ```
+
+  
+
+
+
+  
 
 
 

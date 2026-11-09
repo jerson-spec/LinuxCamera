@@ -96,6 +96,36 @@ int lcd_put_pixel(unsigned int x, unsigned int y , unsigned int color)
 	return 0;
 }
 
+int lcd_write_line_rgb888(int line, unsigned char* rgb,int width)
+{
+	unsigned char *pos;
+	unsigned char* rgbbuffer = rgb;
+	
+	if((unsigned int)width > lcd_var_screeninfo_t.xres || (unsigned int)line >= lcd_var_screeninfo_t.yres)
+	{
+		fprintf(stderr,"%s", "Exceeds resolution\n");
+		return -1;
+	}
+	if(lcd_var_screeninfo_t.bits_per_pixel != 32)
+	{
+		fprintf(stderr,"bits per pixel: %u != 32\n",lcd_var_screeninfo_t.bits_per_pixel);
+		return -1;
+	}
+	
+	pos = mem_addr + draw_offset + line * lcd_fix_screeninfo_t.line_length ;
+	
+	int x = 0;
+	unsigned int* dst = (unsigned int*) pos;
+	
+	while(x < width)
+	{
+		dst[x++] = rgbbuffer[0] << 16 | rgbbuffer[1] << 8 | rgbbuffer[2];
+		rgbbuffer += 3;
+	}
+				
+	return 0;
+}
+
 int lcd_init(char* lcd_cfg_path , app_config_t *lcd_cfg_p)
 {
 	/* 解析配置项并打印 */

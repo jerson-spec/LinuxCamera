@@ -162,13 +162,10 @@ int main(int argc,char**argv)
 	
 	int ret;
 	int i = 0;
-	int j = 0;
+	//int j = 0;
 	int buf_length[camera_cfg.buffers];
 	void *mem[camera_cfg.buffers];
 	unsigned char* rgbbuf;
-	size_t index;
-	unsigned char r,g,b;
-	unsigned int color;
 	int h,w;
 	size_t size;
 	struct fb_fix_screeninfo lcd_fix_screeninfo;
@@ -473,36 +470,24 @@ int main(int argc,char**argv)
 	        }
 			frames++;
 			q++;
-			
-			/* lcd_put_pixe */
+	
+			/* lcd_write_line_rgb888 */
 			for(i = 0 ; i < h ; i++ )
 			{
-				for(j = 0 ; j < w ; j++)
-				{
-					index = (size_t)i * (size_t)w + (size_t)j;
-
-					r = rgbbuf[3 * index + 0];
-					g = rgbbuf[3 * index + 1];
-					b = rgbbuf[3 * index + 2];
-					color = ((unsigned int)r << 16) | ((unsigned int)g << 8 ) | ((unsigned int)b) ;
-					 
-					ret = lcd_put_pixel((unsigned int)j , (unsigned int)i , color);
-					if(ret < 0)
-					{
-						LOG_ERROR("lcd put pixel error, line:%d,column:%d",i,j);
-						break;
-					}
-				}
+				ret = lcd_write_line_rgb888(i, rgbbuf + (size_t)i * 3 * (size_t)w, w);
 				if(ret < 0)
 				{
+					LOG_ERROR("lcd write line error, line: %d,",i);
 					break;
 				}
-			}				
+				
+			}
 			if(ret < 0)
 			{
 				exit_code = -8;
 				break;
 			}
+			
 			t3 = get_time_ms();
 			wait_time += t1 - t0;
 			conv_time += t2 - t1;
