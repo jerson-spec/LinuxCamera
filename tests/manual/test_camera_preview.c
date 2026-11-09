@@ -228,6 +228,18 @@ int main(int argc,char**argv)
 	   return -1;
  	}
 
+	/** 请求30fps **/
+	struct v4l2_streamparm parm;
+	memset(&parm, 0, sizeof(parm));
+	parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	if (ioctl(camera_fd, VIDIOC_G_PARM, &parm) == 0 &&
+	(parm.parm.capture.capability & V4L2_CAP_TIMEPERFRAME)) {
+	parm.parm.capture.timeperframe.numerator= 1;
+	parm.parm.capture.timeperframe.denominator = 30;
+	if (ioctl(camera_fd, VIDIOC_S_PARM, &parm) < 0)
+	LOG_WARN("S_PARM 30fps failed: %s", strerror(errno));
+	}
+
 	/** 检查stride **/
 	if(vfmt.fmt.pix.bytesperline == vfmt.fmt.pix.width * 2)
 	{
@@ -470,11 +482,14 @@ int main(int argc,char**argv)
 	        }
 			frames++;
 			q++;
-	
+			
 			/* lcd_write_line_rgb888 */
+			unsigned int w_offset = (lcd_var_screeninfo.xres - (unsigned int)w) / 2;
+			unsigned int h_offset = (lcd_var_screeninfo.yres - (unsigned int)h) / 2;
+			
 			for(i = 0 ; i < h ; i++ )
 			{
-				ret = lcd_write_line_rgb888(i, rgbbuf + (size_t)i * 3 * (size_t)w, w);
+				ret = lcd_write_line_rgb888(i + h_offset, w_offset, rgbbuf + (size_t)i * 3 * (size_t)w, w);
 				if(ret < 0)
 				{
 					LOG_ERROR("lcd write line error, line: %d,",i);
