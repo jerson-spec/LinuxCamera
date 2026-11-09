@@ -239,6 +239,10 @@ int main(int argc,char**argv)
 	if (ioctl(camera_fd, VIDIOC_S_PARM, &parm) < 0)
 	LOG_WARN("S_PARM 30fps failed: %s", strerror(errno));
 	}
+	else if (ioctl(camera_fd, VIDIOC_S_PARM, &parm) == 0)
+    LOG_INFO("capture fps: %u/%u",
+             parm.parm.capture.timeperframe.numerator,
+             parm.parm.capture.timeperframe.denominator);
 
 	/** 检查stride **/
 	if(vfmt.fmt.pix.bytesperline == vfmt.fmt.pix.width * 2)
@@ -499,7 +503,7 @@ int main(int argc,char**argv)
 			}
 			if(ret < 0)
 			{
-				exit_code = -8;
+				exit_code = -9;
 				break;
 			}
 			

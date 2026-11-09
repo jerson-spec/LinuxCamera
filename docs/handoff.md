@@ -19,27 +19,27 @@
 | 项目 | 当前值 |
 |---|---|
 | 项目 | i.MX6ULL Linux 相机 |
-| 当前阶段 | **v0.5 Continuous Preview 已完成（604 s 稳定验证）** |
+| 当前阶段 | **W3 完成：优化 + 多分辨率 + letterbox** |
 | 语言 | C |
-| 采集 | V4L2 MMAP（4 buffer，poll 超时 2 s） |
+| 采集 | V4L2 MMAP（4 buffer，poll 超时 2 s，`VIDIOC_S_PARM` 请求 30 fps） |
 | 显示 | `/dev/fb0` framebuffer + 双缓冲 |
 | 摄像头 | `/dev/video1` |
 | 摄像头请求 | 1024×600 YUYV |
-| 摄像头实际 | **800×600 YUYV**（驱动调整，15 fps 上限） |
-| `bytesperline` | **1600 = 800×2** |
+| 摄像头实际 | **800×600 YUYV（15 fps）/ 640×480 YUYV（30 fps）** |
+| `bytesperline` | **1600 = 800×2**（640×480 时 1280） |
 | LCD | **1024×600，32bpp，`line_length = 4096`** |
 | 双缓冲 | `yres_virtual = 1200`，`FBIOPAN_DISPLAY`，失败自动降级 |
-| 显示结果 | 左上角 800×600，右侧 224 像素黑色 |
-| 实测 | 15.0 fps，conv 35.1 ms，draw 30.6 ms，0 丢帧，VmRSS 6324 kB |
+| 显示结果 | letterbox 居中；800×600 时左右各 112 像素黑边 |
+| 实测 | 800×600：15 fps，conv 14.0，draw 8.6，CPU 34%；640×480：30 fps，conv 9.4，draw 5.5 |
 | 工具链 | 100ask Buildroot SDK |
 | 连接 | ADB，无板子 IP |
-| 当前标签 | `v0.1` 已打；`v0.5` 待打 |
-| 下一步 | **W3：定点化 + 按行写，优化 CPU 余量** |
+| 当前标签 | `v0.1`、`v0.5` 已打；W3 打算打个里程碑标签 |
+| 下一步 | **v1.0 拍照存卡（JPEG）** |
 | 当前不是 | v1.0 |
 
 一句话：
 
-> **画面已经连续、双缓冲、10 分钟 0 丢帧；15 fps 是摄像头上限，下一步是把 66 ms/帧压下来换余量。**
+> **预览这条链路已经优化到位：800×600@15fps 只用 34% CPU，640×480 能跑 30fps；下一步是让它能拍照。**
 
 ---
 
@@ -170,18 +170,19 @@ LinuxCamera/
 - 合成 YUYV 色条上屏；
 - **摄像头 YUYV 单帧 → RGB → LCD（v0.1）**；
 - **连续预览 + 每秒 FPS/耗时/丢帧/VmRSS 统计（v0.5）**；
-- **双缓冲：`FBIOPAN_DISPLAY` 切页，pan 失败自动降级单缓冲（v0.5）**。
+- **双缓冲：`FBIOPAN_DISPLAY` 切页，pan 失败自动降级单缓冲（v0.5）**；
+- **YUYV→RGB 定点化 + 按行写 framebuffer（W3，conv 14.0 / draw 8.6）**；
+- **letterbox 居中显示（W3）**；
+- **640×480@30 已验证（`VIDIOC_S_PARM` 请求帧率）**。
 
 ### 2.3 还没做的功能
 
-- 多分辨率/letterbox；
 - 触摸/按键；
 - OSD；
 - libjpeg 拍照存卡；
 - 网络推流；
 - 8 小时稳定性；
-- 单元测试/CI；
-- 性能优化（定点化/按行写，W3）。
+- 单元测试/CI。
 
 ### 2.4 各程序状态
 
@@ -218,11 +219,12 @@ v4l2-ctl -d /dev/video1 --list-formats-ext
 
 ### 3.2 摄像头实际分辨率
 
-- 配置请求：1024×600；
+- 配置请求：1024×600（默认）；
 - 驱动实际：**800×600 YUYV**；
 - `bytesperline = 1600`；
 - 摄像头不支持 1024×600；
-- 所以右侧 224 像素黑色是正常的 1:1 显示。
+- 画面用 letterbox 居中，左右各 112 像素黑边；
+- 把配置改成 640×480 可以跑 30fps（摄像头在这个尺寸下支持 30/25/20/15/10/5）。
 
 ### 3.3 工具链
 
@@ -281,7 +283,8 @@ chmod +x test_camera_preview test_Get_images test_Trans_YUYV test_Draw_region
 ./test_camera_preview
 ```
 
-当前 `lcd.ini` 的 `display_time=300`，会保持 5 分钟；测试时改成 5 秒。
+按 Ctrl-C 结束，程序会打印 `DQbuf = Qbuf = Frames` 后退出。
+`lcd.ini` 里的 `display_time` 从 v0.5 起对预览无效（现在由 Ctrl-C 结束）。
 
 ### 3.7 GDB
 
@@ -363,6 +366,8 @@ int  lcd_deinit(void);
 int  lcd_put_pixel(unsigned int x, unsigned int y, unsigned int color);
 int  lcd_flip(void);                 /* 切前后台缓冲，成功 0 / 失败 -1 */
 int  lcd_doublebuffering_on(void);   /* 1 = 双缓冲已启用 */
+int  lcd_write_line_rgb888(int line, int x_offset,
+                           unsigned char *rgb, int width);  /* 按行直写 32bpp */
 void Get_lcd_parameters(struct fb_fix_screeninfo *fix,
                         struct fb_var_screeninfo *var);
 ```
@@ -374,6 +379,7 @@ void Get_lcd_parameters(struct fb_fix_screeninfo *fix,
 - mmap（32 MB 预留区）；
 - 16bpp RGB565 / 32bpp；
 - `lcd_flip()` 用 `FBIOPAN_DISPLAY` 切页，失败自动降级；
+- `lcd_write_line_rgb888()` 是预览快路径：一行只算一次地址，只支持 32bpp；
 - 全局 `mem_addr` / fix / var / `draw_offset`。
 
 ### 4.5 `yuyv`
@@ -419,7 +425,9 @@ STREAMOFF / munmap
 lcd_deinit
 ```
 
-当前是**单帧**，显示 `lcd_display_time` 秒后退出。
+当前是**连续循环**（v0.5 起）：每秒打印一次统计，按 Ctrl-C 结束。
+上面这段是 v0.1 的流程；v0.5 在 `yuyv_to_rgb` 之后会先 `QBUF`，再用
+`lcd_write_line_rgb888` 按行写、`lcd_flip` 切页，然后循环。
 
 ---
 
@@ -451,7 +459,7 @@ lcd_deinit
 6. **右侧黑边**
    - 请求 1024×600，摄像头实际 800×600；
    - `bytesperline=1600` 证明实际宽度 800；
-   - 不是 bug，1:1 显示；缩放/letterbox 留 v1.0。
+   - 不是 bug；v0.1 先 1:1 显示，W3 改成 letterbox 居中（左右各 112 像素）。
 
 7. **RelWithDebInfo 配置异常**
    - 怀疑旧 build 缓存/头文件 ABI 或配置 CRLF；
@@ -542,18 +550,17 @@ display_ms
 
 按优先级：
 
-1. `lcd_put_pixel()` 逐像素调用（480k 次/帧，约 30 ms），CPU 忙占比约 98%；
-2. `yuyv_to_rgb()` 浮点 + 没有 stride；
+1. `lcd_write_line_rgb888()` 只支持 32bpp，其他 bpp 直接返回失败；
+2. `yuyv_to_rgb()` 没有 `src_stride`，只支持 `bytesperline == width*2`；
 3. `yuyv.c` 全局 `full`；
 4. `lcd.c` 全局状态；`lcd_init()` 重置日志、`lcd_deinit()` 关闭日志（所以 `camera.log` 基本为空）；
-5. `test_camera_preview.c` 已 550+ 行，承担主程序职责，v1.0 前要拆；
+5. `test_camera_preview.c` 550+ 行，承担主程序职责，v1.0 前要拆；
 6. `test_Get_images` 文件名直接拼格式名（`.MJPG` / `.YUYV`）；
 7. `app_config_t` 过大；
 8. 配置路径分散，`lcd_init` 会重复 load `lcd.ini`；
 9. `src/main.c` 仍是占位程序；
 10. 首帧延迟 1–1.6 s；
-11. 无单元测试/CI；
-12. `scripts/` 未纳入主流程。
+11. 无单元测试/CI；`scripts/` 未纳入主流程。
 
 ---
 
@@ -601,7 +608,7 @@ cmake --build build-arm -j"$(nproc)"
 ```
 
 7. 上板跑 30 秒，确认 15fps、`DQbuf == Qbuf == Frames`、无 ERROR；
-8. 再开始 W3（优化）或 v1.0（功能）。
+8. 再开始 v1.0（拍照、OSD 等）。
 
 ---
 
@@ -646,4 +653,4 @@ adb forward tcp:1234 tcp:1234
 
 ## 14. 最后一句
 
-> **v0.5 已完成：连续、双缓冲、10 分钟 0 丢帧；下一步是把它跑得更省。**
+> **预览链路的优化和适配已经收口（CPU 34% / 640×480@30 / 居中）；下一步是让它能拍照。**

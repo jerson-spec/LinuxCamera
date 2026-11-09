@@ -3,7 +3,7 @@
 > 本文记录当前开发板、设备节点、工具链、构建、部署和调试方式。
 > 如果换了板子、SDK 或摄像头，先更新本文。
 >
-> 当前阶段：v0.5 Continuous Preview。
+> 当前阶段：W3 完成（预览优化 + 多分辨率 + letterbox）。
 
 ---
 
@@ -16,10 +16,10 @@
 | 系统 | Linux |
 | 摄像头 | USB UVC，当前节点 `/dev/video1` |
 | 摄像头请求分辨率 | 1024×600 |
-| 摄像头实际输出 | **800×600 YUYV**（驱动调整） |
-| 摄像头 `bytesperline` | **1600 = 800 × 2** |
-| LCD | `/dev/fb0`，**1024×600** |
-| 显示结果 | 左上角 800×600，右侧 224 像素黑色 |
+| 摄像头实际输出 | **800×600 YUYV**（驱动调整；640×480 可跑 30fps） |
+| 摄像头 `bytesperline` | **1600 = 800 × 2**（640×480 时 1280） |
+| LCD | `/dev/fb0`，**1024×600，32bpp** |
+| 显示结果 | letterbox 居中，左右各 112 像素黑色 |
 | 主机 | Ubuntu 虚拟机 |
 | 连接方式 | ADB（USB），当前未配置板子 IP |
 | 交叉工具链 | 100ask Buildroot SDK |
@@ -28,8 +28,8 @@
 
 - 摄像头不支持 1024×600；
 - `VIDIOC_S_FMT` 协商后返回 800×600；
-- 代码按实际 800×600 做 1:1 显示；
-- 铺满需要缩放/letterbox/裁剪，属于 v1.0。
+- 代码按实际分辨率做 letterbox 居中（W3 起）；
+- 铺满需要缩放，属于 v1.0 之后的事。
 
 ---
 
@@ -242,20 +242,23 @@ adb push build-arm-dbg/test_camera_preview /root/LinuxCamera/test_camera_preview
 ./test_Trans_YUYV
 ```
 
-### 6.5 摄像头连续预览（v0.5）
+### 6.5 摄像头连续预览
 
 ```bash
 ./test_camera_preview
 ```
 
-预期：
+默认 `camera.ini` 请求 1024×600，摄像头实际给 800×600，画面居中：
 
-- 摄像头实际 800×600，LCD 1024×600，左上角画面 + 右侧黑边；
+- 左右各 112 像素黑边，上下贴边；
 - 每秒打印一行：
-  `fps: 15.0, wait: 0.7, conv: 35.1, draw: 30.6, dropped: 0, rss: 6324 kB`；
+  `fps: 15.0, wait: 43.9, conv: 14.0, draw: 8.6, dropped: 0, rss: 6064 kB`；
 - 按 Ctrl-C 干净退出，收尾打印 `DQbuf = Qbuf = Frames`。
 
-`lcd.ini` 的 `display_time` 从 v0.5 起不再使用（循环由 Ctrl-C 结束）。
+想看 30fps，把 `config/camera.ini` 改成 `width=640 / height=480` 再跑。
+程序会用 `VIDIOC_S_PARM` 请求 30fps；摄像头支持就给 30，不支持会自己降。
+暗光下自动曝光也会把帧率降到 25/20/15——判断依据是 `wait` 变大而 `dropped` 不变。
+这时用 `v4l2-ctl -d /dev/video1 --get-parm` 能看到当前帧率已经变了。
 
 ### 6.6 10 分钟稳定性测试
 
@@ -345,7 +348,8 @@ p lcd_var_screeninfo_t
 | `open /dev/fb0 error` | 节点不对/权限 | `ls -l /dev/fb*` |
 | 画面斜/花 | `bytesperline`/stride 不匹配 | 打印 `bytesperline` |
 | 画面绿/雪花 | 把 MJPEG 当 YUYV | 检查 `S_FMT` 实际格式 |
-| 右侧黑边 | 摄像头宽度 < LCD 宽度 | 1:1 显示正常；缩放留 v1.0 |
+| 画面有黑边 | 摄像头分辨率 < LCD 分辨率 | letterbox 居中，正常 |
+| 帧率突然掉到 25/20/15 | 暗光自动曝光拉长曝光时间 | `v4l2-ctl --get-parm` 确认；不是丢帧 |
 | `FBIOPAN_DISPLAY` 报错 | fb 被 blank，或驱动不支持 pan | `cat /sys/class/graphics/fb0/blank`；`echo 0 > blank` 或让程序降级 |
 | `camera.log` 是空的 | `lcd_init()` 把日志重定向到了 `lcd.log` | 看 `lcd.log` |
 | 程序跑完 gdb 断开 | 程序正常退出 | 重启 gdbserver |
@@ -355,15 +359,10 @@ p lcd_var_screeninfo_t
 ## 9. 当前限制
 
 - 板子没有 IP，gdb 走 ADB；
-
-- 摄像头实际 800×600，LCD 1024×600，右侧黑边正常；
-
-- 15 fps 是摄像头在 800×600 YUYV 下的上限；
-
-- `lcd_put_pixel()` 逐像素，约 30 ms/帧，CPU 忙占比约 98%；
-
-- 已支持双缓冲；没有 letterbox/缩放/触摸/OSD/网络；
-
+- 摄像头 800×600@15fps / 640×480@30fps，LCD 1024×600，letterbox 居中；
+- 暗光下自动曝光会主动降帧，不是丢帧；
+- `lcd_write_line_rgb888()` 只支持 32bpp；
+- 没有触摸/OSD/网络；拍照还没做；
 - 首帧延迟 1–1.6 s（摄像头启动 + 曝光收敛）；
 
   

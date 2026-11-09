@@ -2,7 +2,7 @@
 
 基于 i.MX6ULL + Linux V4L2 的相机项目。
 
-> **当前状态：v0.5 Continuous Preview（连续预览 + 双缓冲 + FPS）**
+> **当前状态：W3 完成（预览优化 + 多分辨率 + letterbox）**
 >
 > 已实现：
 > - V4L2 MMAP 采集、格式/分辨率枚举、MJPEG 保存 JPEG
@@ -11,10 +11,12 @@
 > - YUYV → RGB（FULL / LIMIT）
 > - 合成 YUYV 色条上屏
 > - 摄像头 YUYV 单帧 → RGB → LCD（v0.1）
-> - **连续预览 + 双缓冲（FBIOPAN_DISPLAY）+ 每秒 FPS/耗时/丢帧/内存统计（v0.5）**
+> - 连续预览 + 双缓冲（FBIOPAN_DISPLAY）+ 每秒 FPS/耗时/丢帧/内存统计（v0.5）
+> - **定点转换 + 按行写 framebuffer：CPU 忙占比 98% → 34%（W3）**
+> - **640×480@30fps、letterbox 居中（W3）**
 >
 > 尚未实现：
-> - letterbox / 缩放、多分辨率
+> - 缩放（放大/缩小）
 > - 触摸拍照、JPEG 存卡、OSD
 > - 网络推流
 > - 8 小时稳定性
@@ -60,7 +62,9 @@
 | 摄像头 YUYV 单帧 → LCD | ✅ v0.1 已验证 |
 | 连续预览 + 双缓冲（`FBIOPAN_DISPLAY`） | ✅ v0.5 已验证 |
 | FPS / 耗时 / 丢帧 / VmRSS 统计 | ✅ v0.5 已验证 |
-| letterbox / 缩放 | ❌ 未实现 |
+| 多分辨率（800×600@15 / 640×480@30） | ✅ 已验证 |
+| letterbox 居中显示 | ✅ 已验证 |
+| 缩放（放大/缩小） | ❌ 未实现 |
 | 触摸/按键拍照 | ❌ 未实现 |
 | OSD | ❌ 未实现 |
 | 网络推流 | ❌ 未实现 |
@@ -77,8 +81,8 @@
   - 配置里请求 `1024×600`，驱动调整为 `800×600`
   - `bytesperline = 1600 = 800 × 2`
 - LCD：`/dev/fb0`，**1024×600**
-- 显示结果：画面显示在左上角 800×600，右侧 224 像素为黑色
-- 这个黑边是**分辨率/宽高比不匹配**，不是 bug；v0.1 接受 1:1 显示
+- 显示结果：画面居中，800×600 时左右各 112 像素黑边；640×480 时四周都有黑边
+- 这个黑边是**分辨率/宽高比不匹配**，不是 bug，用 letterbox 居中处理
 
 已验证（v0.1）：
 
@@ -100,7 +104,16 @@
 | 收尾 | DQbuf = Qbuf = Frames = 9036 |
 
 结论：15 fps 是摄像头在 800×600 YUYV 下的上限（`v4l2-ctl --list-formats-ext`
-只给出 15/10/5 三档），不是代码限制；程序约 66 ms/帧，CPU 忙占比约 98%，余量很小。
+只给出 15/10/5 三档），不是代码限制；当时程序约 66 ms/帧，CPU 忙占比约 98%。
+
+已验证（W3 优化，2026-11-09）：
+
+- YUYV→RGB 定点化 + 提取色度项 + 内联 clamp：conv 35.1 → **14.0 ms**；
+- 按行写 framebuffer：draw 30.6 → **8.6 ms**；
+- 800×600 仍是 15 fps，但 CPU 忙占比从 98% 降到 **34%**；
+- 640×480@30 跑通：`fps 30.0, wait 18.2, conv 9.4, draw 5.5, dropped 0`；
+- letterbox 居中显示已生效；
+- 暗光下摄像头会自动降帧（30→25），不是丢帧，详见 `docs/performance.md`。
 
 ---
 
@@ -421,10 +434,10 @@ log_file=./lcd.log
 | `device` | framebuffer 节点 |
 | `color` | LCD 区域测试颜色 |
 | `display_size` | 区域测试尺寸 |
-| `display_time` | 显示时间（秒） |
+| `display_time` | 区域测试/色条测试的保持时间（秒）；预览已不用 |
 | `lcd_log` | LCD 日志配置 |
 
-`test_camera_preview` 会用 `display_time` 作为单帧保持时间；当前 300 秒。
+`test_Draw_region` 用它决定画面保持多久；`test_camera_preview` 从 v0.5 起改为连续预览，不再使用。
 
 ### `config/trans.ini`
 
@@ -495,20 +508,14 @@ save_count=20
 白 | 黄 | 青 | 绿 | 品红 | 红 | 蓝 | 黑
 ```
 
-### 5. 摄像头单帧预览（v0.1）
+### 5. 摄像头连续预览
 
-`camera.ini`：
+`camera.ini`（默认）：
 
 ```ini
 format=YUYV
 width=1024
 height=600
-```
-
-`lcd.ini` ：
-
-```ini
-display_time=300
 ```
 
 运行：
@@ -519,10 +526,13 @@ display_time=300
 
 预期：
 
-- 摄像头实际输出 800×600；
-- 画面显示在 LCD 左上角；
-- 右侧 224 像素黑色；
-- 保持 `display_time` 秒后退出。
+- 摄像头实际输出 800×600（请求 1024×600，驱动协商成 800×600）；
+- 画面在 LCD 上居中，左右各 112 像素黑边；
+- 每秒打印一行 `fps / wait / conv / draw / dropped / rss`；
+- 按 Ctrl-C 退出，收尾打印 `DQbuf = Qbuf = Frames`。
+
+想看 30fps，把 `width`/`height` 改成 640/480 再跑：摄像头在这个尺寸下支持 30fps，
+程序会用 `VIDIOC_S_PARM` 主动请求。暗光下自动曝光会自动降帧（30→25…），属于正常现象。
 
 ---
 
@@ -623,16 +633,16 @@ p lcd_var_screeninfo_t
 
 ## 已知限制
 
-1. 摄像头实际只输出 800×600，LCD 1024×600，右侧黑边是正常 1:1 显示；
-2. 15 fps 是摄像头在 800×600 YUYV 下的上限；程序约 66 ms/帧，CPU 忙占比约 98%，余量很小；
-3. `lcd_put_pixel()` 逐像素调用（480k 次/帧，约 30 ms），是下一步优化目标；
-4. `yuyv_to_rgb()` 没有 `src_stride` 参数，当前仅支持 `bytesperline == width*2`；
-5. `yuyv.c` 使用全局 `full` 状态，依赖先调用 `Is_full_range()`；
-6. `app_config_t` 同时包含 camera/lcd/log/trans，偏大；
-7. `lcd_init()` 会把日志重定向到 `lcd.log`，`lcd_deinit()` 会关闭日志，所以 `camera.log` 基本是空的；
-8. 首帧延迟约 1–1.6 s（摄像头启动 + 曝光收敛），会影响 v1.0 的"3 秒出图"；
-9. 没有 letterbox/缩放/触摸/OSD/网络；
-11. 没有单元测试/CI；
+1. 摄像头实际输出 800×600，LCD 1024×600，居中后左右各 112 像素黑边，正常；
+2. 800×600 下摄像头只有 15 fps；640×480 可以到 30 fps；
+3. 暗光下自动曝光会主动降帧（30→25→20…），不是丢帧；
+4. `lcd_write_line_rgb888()` 只支持 32bpp，其他 bpp 会直接返回失败；
+5. `yuyv_to_rgb()` 没有 `src_stride` 参数，当前仅支持 `bytesperline == width*2`；
+6. `yuyv.c` 使用全局 `full` 状态，依赖先调用 `Is_full_range()`；
+7. `app_config_t` 同时包含 camera/lcd/log/trans，偏大；
+8. `lcd_init()` 会把日志重定向到 `lcd.log`，`lcd_deinit()` 会关闭日志，所以 `camera.log` 基本是空的；
+9. 首帧延迟约 1–1.6 s（摄像头启动 + 曝光收敛）；
+10. 没有触摸/OSD/网络；没有单元测试/CI；
 
 ---
 
@@ -646,17 +656,26 @@ p lcd_var_screeninfo_t
 - [x] 实际 800×600，左上角 1:1 显示
 - [x] tag `v0.1`
 
-### v0.5（当前）
+### v0.5
 
 - [x] 连续预览
 - [x] 双缓冲 + `FBIOPAN_DISPLAY`
 - [x] FPS / 耗时 / 丢帧 / VmRSS 统计
 - [x] 10 分钟不崩（604 s，9036 帧，0 丢帧）
 
+### W3 优化与适配（当前，2026-11-09）
+
+- [x] YUYV→RGB 定点化（conv 35.1 → 14.0 ms）
+- [x] 按行写 framebuffer（draw 30.6 → 8.6 ms）
+- [x] CPU 忙占比 98% → 34%
+- [x] 640×480@30 验证
+- [x] letterbox 居中
+- [ ] 里程碑标签
+
 ### v1.0
 
-- [ ] 多分辨率
-- [ ] letterbox
+- [x] 多分辨率（配置驱动）
+- [x] letterbox
 - [ ] 触摸/按键拍照
 - [ ] JPEG 存卡
 - [ ] OSD

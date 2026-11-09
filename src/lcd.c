@@ -96,12 +96,17 @@ int lcd_put_pixel(unsigned int x, unsigned int y , unsigned int color)
 	return 0;
 }
 
-int lcd_write_line_rgb888(int line, unsigned char* rgb,int width)
+int lcd_write_line_rgb888(int line,int x_offset,unsigned char* rgb,int width)
 {
 	unsigned char *pos;
 	unsigned char* rgbbuffer = rgb;
-	
-	if((unsigned int)width > lcd_var_screeninfo_t.xres || (unsigned int)line >= lcd_var_screeninfo_t.yres)
+
+	if(line < 0 || x_offset < 0)
+	{
+		fprintf(stderr,"line: %d or x_offset: %d error\n",line,x_offset);
+		return -1;
+	}
+	if((unsigned int)(x_offset + width) > lcd_var_screeninfo_t.xres || (unsigned int)line >= lcd_var_screeninfo_t.yres)
 	{
 		fprintf(stderr,"%s", "Exceeds resolution\n");
 		return -1;
@@ -112,7 +117,7 @@ int lcd_write_line_rgb888(int line, unsigned char* rgb,int width)
 		return -1;
 	}
 	
-	pos = mem_addr + draw_offset + line * lcd_fix_screeninfo_t.line_length ;
+	pos = mem_addr + draw_offset + line * lcd_fix_screeninfo_t.line_length + x_offset * 4;
 	
 	int x = 0;
 	unsigned int* dst = (unsigned int*) pos;

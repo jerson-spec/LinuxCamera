@@ -1,6 +1,6 @@
 # 架构说明
 
-> 当前状态：**v0.5 Continuous Preview**（连续预览 + 双缓冲 + FPS）。
+> 当前状态：**W3 完成**（连续预览 + 双缓冲 + 定点转换 + 按行写 + letterbox）。
 >
 > 本文描述当前真实代码结构，不描述理想中的最终架构。
 > 新会话请先读 `docs/handoff.md`，再读本文。
@@ -20,7 +20,8 @@ V4L2 采集 → YUYV 转换 → LCD 显示 → 拍照/存卡 → 网络推流
 当前已经完成：
 
 ```text
-摄像头 YUYV 单帧 → yuyv_to_rgb() → lcd_put_pixel() → /dev/fb0
+摄像头 YUYV → yuyv_to_rgb()（定点）→ 按行写 framebuffer → 双缓冲 flip
+每秒统计 fps/耗时/丢帧/内存；支持 800×600@15 / 640×480@30 和 letterbox 居中
 ```
 
 ```text
@@ -41,7 +42,7 @@ V4L2 MMAP 采集
     │
     ├── MJPEG → 保存 .jpg
     │
-    └── YUYV → 单帧预览
+    └── YUYV → 连续预览
 ```
 
 对应程序：
@@ -56,15 +57,17 @@ tests/manual/test_Get_images.c
 open video
   → QUERYCAP
   → S_FMT(YUYV, 请求 1024×600)
-  → 驱动实际返回 800×600
+  → 驱动实际返回 800×600（或 640×480）
+  → VIDIOC_S_PARM 请求 30 fps（驱动按支持情况给）
   → REQBUFS(4)
   → mmap
   → QBUF × 4
   → STREAMON
   → poll(2000ms) → DQBUF
-  → yuyv_to_rgb()
+  → yuyv_to_rgb()（定点）
   → QBUF（尽早归还）
-  → lcd_put_pixel() × 480k
+  → 算居中偏移 (xres-w)/2、(yres-h)/2
+  → 逐行 lcd_write_line_rgb888(y0+i, x0, ...)
   → lcd_flip()（FBIOPAN_DISPLAY）
   → 每秒统计 fps/wait/conv/draw/dropped/rss
   → 循环直到 Ctrl-C
@@ -103,16 +106,14 @@ tests/manual/test_Trans_YUYV.c
 - 摄像头实际：`800×600` YUYV
 - `bytesperline = 1600 = 800 × 2`
 - LCD：`1024×600`
-- 显示：左上角 800×600，右侧 224 像素黑色
+- 显示：letterbox 居中，800×600 时左右各 112 像素黑色
 
 原因：
 
 - 摄像头不支持 1024×600；
 - `VIDIOC_S_FMT` 会协商并调整；
 - 代码读取 `vfmt.fmt.pix.width/height` 使用实际值；
-- 1:1 显示，不缩放。
-
-这不是 bug。铺满需要缩放/letterbox/裁剪，属于 v1.0。
+- W3 起用 letterbox 居中，不缩放。
 
 ---
 
@@ -264,6 +265,8 @@ int  lcd_deinit(void);
 int  lcd_put_pixel(unsigned int x, unsigned int y, unsigned int color);
 int  lcd_flip(void);                 /* FBIOPAN_DISPLAY 切页 */
 int  lcd_doublebuffering_on(void);
+int  lcd_write_line_rgb888(int line, int x_offset,
+                           unsigned char *rgb, int width);
 void Get_lcd_parameters(struct fb_fix_screeninfo *fix,
                         struct fb_var_screeninfo *var);
 ```
@@ -293,7 +296,7 @@ void Get_lcd_parameters(struct fb_fix_screeninfo *fix,
 | `test_Get_images.c` | V4L2 采集/枚举/保存 JPEG |
 | `test_Draw_region.c` | LCD 参数打印 + 绘制区域 |
 | `test_Trans_YUYV.c` | 合成 YUYV 色条 → RGB → LCD |
-| `test_camera_preview.c` | 摄像头 YUYV 单帧 → RGB → LCD（v0.1） |
+| `test_camera_preview.c` | 连续预览 + 双缓冲 + 统计（v0.5 / W3） |
 
 ### 5.6 构建目标
 
@@ -303,7 +306,7 @@ camera               # src/main.c，配置检查占位
 test_Get_images      # 采集测试
 test_Draw_region     # LCD 区域测试
 test_Trans_YUYV      # YUYV 色条演示
-test_camera_preview  # v0.1 单帧预览
+test_camera_preview  # 连续预览（v0.5，W3 优化）
 config_test          # 配置测试
 ```
 
@@ -329,51 +332,42 @@ config_test          # 配置测试
 
 按优先级：
 
-1. `lcd_put_pixel()` 逐像素，480k 次/帧约 30 ms，CPU 余量只剩约 2%；
-2. `yuyv_to_rgb()` 浮点 + 没有 stride 参数；
-3. `yuyv.c` 全局 `full` 状态；
-4. `lcd.c` 全局状态；`lcd_init()` 重置日志、`lcd_deinit()` 关闭日志；
-5. `test_Get_images` 文件名直接拼格式名（`.MJPG` / `.YUYV`）；
-6. `test_camera_preview.c` 550+ 行，承担主程序职责；
-7. `app_config_t` 过大；
-8. 配置路径分散，`lcd_init()` 会重复 load `lcd.ini`；
-9. 首帧延迟 1–1.6 s；
-10. 没有单元测试/CI；
+1. `yuyv_to_rgb()`  没有 stride 参数；
+2. `yuyv.c` 全局 `full` 状态；
+3. `lcd.c` 全局状态；`lcd_init()` 重置日志、`lcd_deinit()` 关闭日志；
+4. `test_camera_preview.c` 550+ 行，承担主程序职责；
+5. `app_config_t` 过大；
+6. 配置路径分散，`lcd_init()` 会重复 load `lcd.ini`；
+7. 首帧延迟 1–1.6 s；
+8. 没有单元测试/CI；
 
 ---
 
 ## 8. 下一步架构演进
 
-### W3：先优化，再加功能
+### W3 已完成（2026-11-09）
 
 ```text
-现状：conv 35.1 ms + draw 30.6 ms = 65.7 ms / 66.7 ms（CPU 98%）
+优化前：conv 35.1 + draw 30.6 = 65.7 ms / 66.7 ms（CPU 98%）
+优化后：conv 14.0 + draw  8.6 = 22.6 ms / 66.7 ms（CPU 34%）
 
-第 1 刀：定点化 YUYV→RGB
-  conv 35.1 → 目标 <15 ms
-
-第 2 刀：融合转换与上屏、按行写
-  draw 30.6 → 目标 <8 ms
-  顺带去掉 1.4 MB 的 RGB888 中间 buffer
-
-验收：单帧 <25 ms；800×600 仍 15fps；640×480 能跑满 30fps
+结果：640×480@30 跑通；letterbox 居中
 ```
 
-注意：
+### 下一步：v1.0 拍照
 
-- 优化不会提高 800×600 的 fps（摄像头锁死 15），收益是 CPU 余量和 640×480@30；
-- 一次只改一刀，改完上板对比三段时间；
-- 不要急着换板子。
+- 先把 `test_camera_preview.c` 里的拍照逻辑单独拆成函数（触发源先用信号，
+  后面换触摸）；
+- 用 libjpeg 或摄像头 MJPEG 存盘，文件写到 `images/`；
+- 拍照时不要改预览主循环的结构，触发只置标志。
 
-### v1.0 前
+### v1.0 前要做的小重构
 
 - 把 V4L2 采集抽到 `src/camera.c`；
 - 把显示循环抽到 `src/display.c`；
 - `src/main.c` 只负责编排；
 - 日志只在 main 初始化一次，`lcd.c` 不再碰日志；
-- 再考虑拆 `app_config_t`；
-- 加 letterbox/缩放；
-- 加触摸/OSD/JPEG。
+- 再考虑拆 `app_config_t`。
 
 ---
 

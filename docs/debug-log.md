@@ -213,11 +213,32 @@ yuyv: hoist chroma terms per pixel pair, inline clamp, drop memcpy (conv 25.9 ->
   lcd: add row-based RGB888 blit (draw 30.9 -> 8.6 ms)
   ```
 
-  
 
 
 
-  
+# [ camera: request frame rate via VIDIOC_S_PARM ]——26_11_09
+
+- 上面对conv和draw做完降低后下一步上30fps，具体的方法是把分辨率降到640 *480，v4l2-ctl -d /dev/video1 --list-formats-ext查询设备属性，这种分辨率格式下他支持30fps，直接修改camera.ini配置把width 、height修改为640、480上机实验，发现分辨率确实改过来了，但是fps居然还是15，甚至会降到10，原因在于之前提过的：V4L2 的 `S_FMT` 不是“强制设置”，而是“协商”，所以我们需要在 `S_FMT` 之后用 ioctl VIDIOC_S_PARM加一段请求 30fps，这样操作之后上板，注意 echo performance > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor把降频去掉，直接打这串命令会提示没权限，加sudo也不行，先后执行两个cat命令后再echo这样操作就可以了，实验结果果然更正过来：fps: 30.0, wait: 18.1, conv: 9.5, draw: 5.5, dropped: 0, rss: 4436 kB，fps变为了30且wait的时间也很足；
+
+  code -> git : 
+
+  ```
+  camera: request frame rate via VIDIOC_S_PARM
+  ```
+
+
+
+# [ lcd: letterbox centering via x_offset ]——26_11_09
+
+- 30fps的情况下也成功验证，下一步就是做居中显示，unsigned int w_offset = (lcd_var_screeninfo.xres - (unsigned int)w) / 2; ...unsigned int h_offset = (lcd_var_screeninfo.yres - (unsigned int)h) / 2;算出偏移后再对应修改即可，这里我修改完后上机实验，发现y方向偏移正确设置，是在中间，但是x方向并不在中间，但也不是像之前一样紧贴左边，而是在距离左边有一段位置，但不多，后面审查代码才发现：pos = mem_addr + draw_offset + line * lcd_fix_screeninfo_t.line_length + x_offset ; 这个x_offset后面我忘了加 * lcd_var_screeninfo_t.bitsperpixel  / 8  ，这里因为我是RGB888，即32位格式，所以这里只要在x_offset后面补上* 4即可，上机无错误，上下左右正确显示在中间；——另外提一嘴这里我既然实现了lcd_put_pixel和lcd_write_line_rgb888两个函数，那么在lcd_write_line_rgb888里如果判断不是32位的话其实可以不用打印错误后直接返回-1，如果能做一个不是32位比如说16位，降级到用lcd_put_pixel函数去做绘制的实现，这样会比较好，但这里我懒得做了；
+
+- 实验过程中发现一个有意思的现象，正常情况下实验结果是：fps: 30.0, wait: 18.2, conv: 9.5, draw: 5.5, dropped: 0, rss: 4440 kB，和上面的差不多，但是如果手在摄像头面前晃的话，他接下来都会降到25fps左右，即：fps: 24.9, wait: 26.3, conv: 8.4, draw: 5.4, dropped: 0, rss: 4440 kB这样的形式，但观察可以发现，wait很充裕，dropped没丢，rss没泄露，conv和draw时间稳定，仅fps出现下降，说明这是相机自身策略的原因，后面查询资料：“ UVC **自动曝光**：手晃一下，画面里有手/阴影，AE 判断光线不足，把曝光时间拉长；曝光时间一超过帧间隔（1/30 s = 33.3 ms），驱动只能把帧率降到下一档 **25fps**（1/25 = 40 ms），正好对应上 `wait 26.3 + conv 8.2 + draw 5.5 ≈ 40`。而且它一直没恢复，说明场景亮度稳定在了较暗的状态，AE 没有把曝光调回去。”，“它不说明‘帧率掉了’，而是‘摄像头在暗光下用帧率换曝光’。“，”另外，`conv` 从 9.4 降到 8.2 是帧率降低后 USB 中断变少的副作用，并不是代码本身变快
+
+  code -> git : 
+
+  ```
+  lcd: letterbox centering via x_offset
+  ```
 
 
 
