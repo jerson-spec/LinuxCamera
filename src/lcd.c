@@ -160,6 +160,8 @@ int lcd_init(char* lcd_cfg_path , app_config_t *lcd_cfg_p)
 		return -1;
 	}
 	*lcd_cfg_p = cfg;
+	
+	config_print(&cfg);
 
 	/* 初始化日志 */
 	if(log_level_parse(cfg.lcd_log_level, &log_level) < 0 )

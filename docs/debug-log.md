@@ -251,22 +251,61 @@ yuyv: hoist chroma terms per pixel pair, inline clamp, drop memcpy (conv 25.9 ->
 # [ camera: sigaction for SIGUSR1, snapshot as .rgb, log actual fps ]——26_11_10
 
 - static int snapshot_save(unsigned char* rgbbuf,int w,int h)函数里，write函数我一开始写的是	if((size_t)write(file_fd, rgbbuf, sizeof(rgbbuf)） != (size_t)w *(size_t) h * 3)，这个执行的时候必然是判断失败的，这里sizeof(rgbbuf)算的是形参的sizeof(unsigned char*)，对64位平台，指针大小是8 字节，这个大小是8，必然和后面像素字节大小是不相等的；——另外这里write是写的一整个w * h * 3，对于我们这里的数据量，一次写这么大通常不会出什么问题，但更好的方式是write多次，条件判断后退出，这样更规范，也更通用；
+
 - 上机实验，发现LOG_WARN("S_PARM 30fps failed: %s", strerror(errno));没打印，改成LOG_ERROR，也没反应，gdb调试发现确实是走了LOG_WARN分支，程序fps降到25（640*480，不降频，请求30fps），然后再加上fprintf(...)，这下两个都出来了，而fprintf却好像没打印，真是太奇怪了，我怀疑和strerror(errno)有关系，进LOG_WARN或LOG_ERROR内部log_write时error冲突，可能是这样；后面去调试发现并不是这样，猜测失败，log_write里在进函数之前就把error保存起来了怎么会冲突呢，这个说法不成立，实际情况是这个ioctl  G_PARM 、 ioctl S_PARM 逻辑写错了，if else分支错乱，导致程序执行有问题（调试发现执行到LOG_WARN也是错觉，实际上并没有执行到这，只是if后面紧跟着这条语句，所以执行到if后，跳到if()的空格后，LOG_WARN之前，显示出LOG_WARN但其实并没执行，很简单的验证方式，在if()后把LOG_WARN用{}括起来，就可以看出来并没有进到这个括号里）,后来仔细分析了一下代码然后对应把逻辑修正，就可以正常打印出LOG_INFO调试信息了，请求帧率后，能成功打印出我们设置的1/30，也就是说我们请求30fps是成功了的；——这也提醒我在实验发现有问题时第一时间要静下来认真思考代码逻辑，再审查代码，在不清楚代码执行逻辑的情况下盲目去进行gdb调试只会让思路越来越乱，清晰代码的逻辑了再去执行调试才会事半功倍；
+
 - 但为什么这个帧率是一直25呢，后来想个办法试验了一下，用手挡住摄像头，帧率立马降到十几，完全遮住降得更狠，而又用手电筒照射呢，帧率立马从25飙到三十，这证明确实是相机自身曝光的问题而与我们的代码无关，白天帧率一直三十没发现这个问题，一到晚上或换个环境这个曝光降低帧率的现象就格外突出了，不过令我没想到的是晚上我也有日光灯照射啊，我觉得和白天光照没什么区别，但是实际上结果就是有差别；
+
 - 我们注册的信号处理函数第一次存图可以，第二次再kill -USR1 < pid >直接失败，输出一个User defined signal 1，唯一存的这张图还打不开；存的图打不开这个很好解释，因为我们存的是rgb数据，文件名后缀是jpg（一开始是YUYV，复用的拍照时格式，即camera.ini下【camera】下的format=YUYV，后面在【storage】下新增了一项save_format，令他为jpg，但是实际上这部分修改对当前没什么作用，留着后面用），结果当然打不开，后面在代码中修改文件名后缀为.rgb，存下来之后用fmpeg -f rawvideo -pix_fmt rgb24 -s 640x480 -i IMG_xxx.rgb out.png做转变，转变完png后打开的图是正确的；
+
 - 而关于信号的问题：普通的signal函数我们注册了信号处理函数，执行一次就退出了，于是查找解决方案，用更全面的sigaction函数替代，设置flag为”SA_RESTART：使被信号中断的系统调用自动重新启动。“，这样就可以多次执行kill -USR1 < pid >发信号而使这个pid进程不退出了；——不过究竟为什么我们用这个SIGUSR1信号，发一次信号执行一次信号处理函数，下次就发不了了呢，我不理解，但也没去深究了；
+
 - INFO,WARN，包括我记录文件的filename，结果出来都是1970年开始，我想办法把他变成实际的我的pc时间，查找资料：板子上先：export TZ=CST-8 ； echo "CST-8" > /etc/TZ 设板子的时区（中国无夏令时，CST-8)，并让所有进程都生效；再在ubuntu上sudo timedatectl set-timezone "Asia/Shanghai"设置ubuntu时区为Asian/Shanghai，并sudo timedatectl set-ntp true启用NTP网络同步，之后adb shell "date -s @$(date +%s)"把ubuntu设置的时间推到板子上去，date查看，板子上时间就和ubuntu时间同步，即和pc时间一样了（或者可以自己在板子上手动设置板子的时间：date -s "2026-11-09 18:30:00"）——路径很曲折，这条流程我看起来未必规范，大概率不是永久修改，但最终确实能同步过来就是了；
+
 - 路径思考：我用YUYV存摄像头数据，存下来之后转成RGB在屏幕上显示实时画面，之后拍照我又要把这个RGB转到JPEG存起来，那为什么我不干脆一开始就用JPEG存摄像头数据，然后转成RGB在屏幕上显示，拍照的时候我就直接把转成RGB之前的JPEG数据存起来，这样不是更方便么，用我现在的这种方式还要多一个RGB->JPEG的步骤，用libjpeg，这样看起来更繁琐；后面稍微了解了一下就知道，YUYV转RGB相对容易，耗时也低，如果换成一开始就用JPEG的话当然也可以，但是光conv一项就要比现在多花很多时间，并且是压缩画质，所以也有它的局限性；——目前做到我这个程度，后面要么用libjpeg把rgb转成jpeg存图，要么是别的办法，这里因为我之前已经做过test_Get_pictures的逻辑，已经能存图，所以可以在收到拍照信号时转变流程，由之前的预览的路径切到拍照的路径，这样就行了，延迟也可以接受，正好还可以乘机把test_camera_preview里庞大的代码量压缩，抽一个camera.c出来复用；
 
+  code -> git : 
+
+  ```
+   camera: sigaction for SIGUSR1, snapshot as .rgb, log actual fps
+  ```
 
 
 
+# [ camera: extract camera.c from test_camera_preview.c_Problematic edits ]——26_11_10
 
+- 我的重构上机实验后完全正常，但结构还是有点问题，交给ai审查代码发现诸多隐患和不规范：一是test_camera_preview里main中引用src/camera.c里操作的cam_t结构体，这个方式选择有点问题，我一开始是利用camera_init参数传递，主函数调用初始化函数时把camera.c里的结构体传过来，是可以的，但是位置选择有说法，我一开始放在config_load(cam_t.cfg_path, &cam_t.cfg)之后的位置，这个位置比较靠前，这个时候除了这个cam_t.cfg结构体成员被赋值外其余成员值全是0（前面有memset），之后main里接到他，下面引用他时，比如说size = (size_t)cam_t.w * (size_t)cam_t.h * 3;这里，使用这个接回来的结构体这些w，h变量应该都是0的，但是实验结果为什么又是正确的呢，原因在于：“
 
+    ```
+    /* test_camera_preview.c:27 */
+    camera_t cam_t;
+    
+    /* camera.c:19 */
+    camera_t cam_t;
+    ```
+    这两个同名全局变量，两个都是**文件作用域、无初始化**的定义。在 C 里这叫 **tentative definition（试探性定义）**；GCC 10 之前默认 `-fcommon`，这种定义会放进 **common 段**，**链接器会把同名 common 符号合并成一个对象**。所以：main 的 `cam_t` 和 camera.c 的 `cam_t` 是**同一块内存**；`*cam_t_p = cam_t;` 实际上是**自己赋给自己**（`cam_t_p == &cam_t`），等于什么都没做；后面 `cam_t.w = ...` 写的就是 main 读的那一块。靠的是这个巧合，而不是拷贝生效；”;
+    
+    所以正确的做法是把camera_init里的	*cam_t_p = cam_t;位置放到靠后一点，等camera_init里把camera_t结构体下各成员值差不多都填满了的时候再把他返回去，这样主程序拿到的就是完整的结构体信息了，但是这样的方式只是拷贝一次，也就是说把camera_init下的这一次camera_t结构体的值拷给主程序，之后如果camera.c里又对结构体成员做更改，主程序这边还是旧值不会更新，这显然在之后会造成比较大的漏洞；
+    
+    所以要让两边共享，我们上面一开始的这种误打误撞的方式确实是共享的，但是不规范，规范的做法是在camera.h 里加上extern camera_t cam_t; 声明外部可调用，这样主程序里写的 `cam_t.w` 和 camera.c 里操作的是**同一个对象**，能拿到实时值（和现在 `-fcommon` 合并的效果一样，但这次是“说清楚了的”），但这样又不好：	
+    
+    - 头文件变成“全局变量清单”，任何 .c 都能改相机状态；
+    
+    - 模块的封装没了，以后想支持两个摄像头、想在单元测试里 mock 一个相机，全都不可能；
+    
+    - 谁在什么时候改了 `fd`/`w`/`mem`，grep 都查不清。
+    
+    总之更推荐的做法就是每一个函数里加一个camera_t *c 指针传参，这样调用函数时获取到的值就能保证是实时的真实的值，并且是**“值从哪来”能说清楚的结构**：谁拥有实例，谁传指针，都一清二楚，将来能兼容的情况也就更多；
 
+- 二是camera.h里的camera_t结构体成员里存放了与camera本身无关的config、log相关配置等变量，这些语义上来讲不应该放进camera结构体里，直接在函数里创建变量并使用就是了，当然这是属于规范性的问题；
 
+- 三是camera.c里camera_init函数里做的事太多，初始化相机配置项，日志、打开设备、获取设备属性、设置视频采集参数、检查stride，分辨率、请求30fps、申请帧缓冲、映射buffer、申请到的帧缓冲放入队列，将来不好解耦使用；
 
+- 其余的还有一些编写时没注意到的小问题，编译和调试最终也都能发现并修改过来，还有一些细节问题，就比如`strncpy(cam_t.cfg_path, path, 256)` 不保证以 `\0` 结尾、main 里 `close(cam_t.fd)`是无效的、没有考虑之后模式切换（预览->拍照）的流程问题等；
 
+  code -> git : 
 
-
+  ```
+   camera: extract camera.c from test_camera_preview.c_Problematic edits
+  ```
 
