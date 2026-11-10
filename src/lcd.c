@@ -29,12 +29,16 @@ int lcd_doublebuffering_on(void)
 	return Is_lcd_doublebuffering;
 }
 
+/*
+*	双缓冲绘制翻转
+*	**ioctl FBIOPAN_DISPLAY设置可见区
+*	**visible_offset记录成功设置的上一次可见区（偏移）
+*/
 int lcd_flip(void)
 {
 	static unsigned int visible_offset = 0;
 	unsigned int display_target = (visible_offset == 0)? lcd_size : 0;
 	unsigned int display_target_y = display_target / lcd_fix_screeninfo_t.line_length;
-	
 	
 	/* ioctl FBIOPAN_DISPLAY */
 	lcd_var_screeninfo_t.xoffset = 0;
@@ -57,6 +61,10 @@ int lcd_flip(void)
 	return 0;
 }
 
+/*
+*	逐点绘制像素，兼容32位、16位格式
+*	参数含义：要绘制像素的x值（列号）、y值（行号）、像素颜色（RGB）
+*/
 int lcd_put_pixel(unsigned int x, unsigned int y , unsigned int color)
 {
 	unsigned char *pos;
@@ -96,6 +104,10 @@ int lcd_put_pixel(unsigned int x, unsigned int y , unsigned int color)
 	return 0;
 }
 
+/*
+*	按行绘制，仅支持RGB888格式
+*	参数含义：要绘制的行号、x方向偏移（传入算好的定值）、rgbbuf（数据源头）、（相机）行像素数
+*/
 int lcd_write_line_rgb888(int line,int x_offset,unsigned char* rgb,int width)
 {
 	unsigned char *pos;
@@ -131,6 +143,10 @@ int lcd_write_line_rgb888(int line,int x_offset,unsigned char* rgb,int width)
 	return 0;
 }
 
+/*
+*	lcd初始化
+*	解析lcd.ini配置项、初始化lcd.log日志、...
+*/
 int lcd_init(char* lcd_cfg_path , app_config_t *lcd_cfg_p)
 {
 	/* 解析配置项并打印 */
@@ -254,7 +270,11 @@ int lcd_deinit(void)
 	return 0;
 }
 
-
+/* 获取lcd_init里获得的lcd参数：
+*	struct fb_fix_screeninfo lcd_fix_screeninfo_t;
+*  	struct fb_var_screeninfo lcd_var_screeninfo_t;
+*  返回给调用者；
+*/
 void Get_lcd_parameters(struct fb_fix_screeninfo *lcd_fix_screeninfo_p,struct fb_var_screeninfo *lcd_var_screeninfo_p)
 {
 	if (lcd_fix_screeninfo_p != NULL) {

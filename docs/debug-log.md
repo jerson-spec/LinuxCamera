@@ -29,7 +29,7 @@
 - 在tests/manual/test_Draw_region.c文件中，一开始是定义struct fb_fix_screeninfo *lcd_fix_screeninfo_p;，然后下面直接调用lcd.h/c的	Get_lcd_parameters(lcd_fix_screeninfo_p,lcd_var_screeninfo_p);函数，然后在下面把里面的成员引出来打印，编译上机，结果就是段错误：这里是野指针，lcd_fix_screeninfo_p在定义后没指向任何值、分配任何空间，然后直接传参，就会造成错误，又因为我们这里这个函数没有错误检查没有返回值，所以一直走到下面的 	LOG_INFO("Length of frame buffer mem : %u\n",lcd_fix_screeninfo.smem_len); 才报段错误；正确的方式是定义后先给他指向一个结构体，然后传参，传完后就可以使用这个指向的结构体，但是这里更简便的办法是直接定义struct fb_fix_screeninfo lcd_fix_screeninfo;，然后	Get_lcd_parameters(&lcd_fix_screeninfo,&lcd_var_screeninfo);，之后就可以打印；
 
 - scripts/*.sh这些脚本文件一开始Ubuntu上运行报/bin: bad interpreter: Permission denied错误，原因是脚本是 **Windows 换行符（CRLF）**，不是 Linux 换行符（LF）。`/usr/bin/env` 看到的解释器名变成了 `bash\r`（多了个 `\r`），所以找不到。解决的办法是 sudo apt install dos2unix -y 
-  dos2unix scripts/ *.sh，这是一个用于将 Windows 格式的文本文件转换为 Unix/Linux 格式的工具。这样转换了之后就可以./build.sh或其他.sh文件自动执行经常输入的那些命令了，这里也作了一个提醒，shell命令需要自己会写，光能看懂和修改还不够，短期长期来看都是这样；
+  dos2unix scripts/ *.sh，这是一个用于将 Windows 格式的文本文件转换为 Unix/Linux 格式的工具。这样转换了之后就可以./build.sh或其他.sh文件自动执行经常输入的那些命令了，这里也作了一个提醒，shell命令需要自己会写，光能看懂和修改还不够，短期长期来看都是这样；——另外不要忘了给这些个.sh文件chmod +x *.sh加上可执行权限，加上之后才能够运行，否则会报Permission denied的错误，这种错误加上sudo照样运行不了，因为三个组都没有可执行权限；
   
   code -> git : 
   
@@ -160,6 +160,9 @@
   - test_Get_images: log file name with actual format
   ```
 
+  ```
+  tag: v0.5
+  ```
   
   
 # [ yuyv: integer fixed-point YUYV->RGB (conv 35.1 -> 25.9 ms) ]——26_11_08
@@ -239,6 +242,31 @@ yuyv: hoist chroma terms per pixel pair, inline clamp, drop memcpy (conv 25.9 ->
   ```
   lcd: letterbox centering via x_offset
   ```
+  ```
+  tag: preview-30fps-letterbox-milestone
+  ```
+
+
+
+# [ camera: sigaction for SIGUSR1, snapshot as .rgb, log actual fps ]——26_11_10
+
+- static int snapshot_save(unsigned char* rgbbuf,int w,int h)函数里，write函数我一开始写的是	if((size_t)write(file_fd, rgbbuf, sizeof(rgbbuf)） != (size_t)w *(size_t) h * 3)，这个执行的时候必然是判断失败的，这里sizeof(rgbbuf)算的是形参的sizeof(unsigned char*)，对64位平台，指针大小是8 字节，这个大小是8，必然和后面像素字节大小是不相等的；——另外这里write是写的一整个w * h * 3，对于我们这里的数据量，一次写这么大通常不会出什么问题，但更好的方式是write多次，条件判断后退出，这样更规范，也更通用；
+- 上机实验，发现LOG_WARN("S_PARM 30fps failed: %s", strerror(errno));没打印，改成LOG_ERROR，也没反应，gdb调试发现确实是走了LOG_WARN分支，程序fps降到25（640*480，不降频，请求30fps），然后再加上fprintf(...)，这下两个都出来了，而fprintf却好像没打印，真是太奇怪了，我怀疑和strerror(errno)有关系，进LOG_WARN或LOG_ERROR内部log_write时error冲突，可能是这样；后面去调试发现并不是这样，猜测失败，log_write里在进函数之前就把error保存起来了怎么会冲突呢，这个说法不成立，实际情况是这个ioctl  G_PARM 、 ioctl S_PARM 逻辑写错了，if else分支错乱，导致程序执行有问题（调试发现执行到LOG_WARN也是错觉，实际上并没有执行到这，只是if后面紧跟着这条语句，所以执行到if后，跳到if()的空格后，LOG_WARN之前，显示出LOG_WARN但其实并没执行，很简单的验证方式，在if()后把LOG_WARN用{}括起来，就可以看出来并没有进到这个括号里）,后来仔细分析了一下代码然后对应把逻辑修正，就可以正常打印出LOG_INFO调试信息了，请求帧率后，能成功打印出我们设置的1/30，也就是说我们请求30fps是成功了的；——这也提醒我在实验发现有问题时第一时间要静下来认真思考代码逻辑，再审查代码，在不清楚代码执行逻辑的情况下盲目去进行gdb调试只会让思路越来越乱，清晰代码的逻辑了再去执行调试才会事半功倍；
+- 但为什么这个帧率是一直25呢，后来想个办法试验了一下，用手挡住摄像头，帧率立马降到十几，完全遮住降得更狠，而又用手电筒照射呢，帧率立马从25飙到三十，这证明确实是相机自身曝光的问题而与我们的代码无关，白天帧率一直三十没发现这个问题，一到晚上或换个环境这个曝光降低帧率的现象就格外突出了，不过令我没想到的是晚上我也有日光灯照射啊，我觉得和白天光照没什么区别，但是实际上结果就是有差别；
+- 我们注册的信号处理函数第一次存图可以，第二次再kill -USR1 < pid >直接失败，输出一个User defined signal 1，唯一存的这张图还打不开；存的图打不开这个很好解释，因为我们存的是rgb数据，文件名后缀是jpg（一开始是YUYV，复用的拍照时格式，即camera.ini下【camera】下的format=YUYV，后面在【storage】下新增了一项save_format，令他为jpg，但是实际上这部分修改对当前没什么作用，留着后面用），结果当然打不开，后面在代码中修改文件名后缀为.rgb，存下来之后用fmpeg -f rawvideo -pix_fmt rgb24 -s 640x480 -i IMG_xxx.rgb out.png做转变，转变完png后打开的图是正确的；
+- 而关于信号的问题：普通的signal函数我们注册了信号处理函数，执行一次就退出了，于是查找解决方案，用更全面的sigaction函数替代，设置flag为”SA_RESTART：使被信号中断的系统调用自动重新启动。“，这样就可以多次执行kill -USR1 < pid >发信号而使这个pid进程不退出了；——不过究竟为什么我们用这个SIGUSR1信号，发一次信号执行一次信号处理函数，下次就发不了了呢，我不理解，但也没去深究了；
+- INFO,WARN，包括我记录文件的filename，结果出来都是1970年开始，我想办法把他变成实际的我的pc时间，查找资料：板子上先：export TZ=CST-8 ； echo "CST-8" > /etc/TZ 设板子的时区（中国无夏令时，CST-8)，并让所有进程都生效；再在ubuntu上sudo timedatectl set-timezone "Asia/Shanghai"设置ubuntu时区为Asian/Shanghai，并sudo timedatectl set-ntp true启用NTP网络同步，之后adb shell "date -s @$(date +%s)"把ubuntu设置的时间推到板子上去，date查看，板子上时间就和ubuntu时间同步，即和pc时间一样了（或者可以自己在板子上手动设置板子的时间：date -s "2026-11-09 18:30:00"）——路径很曲折，这条流程我看起来未必规范，大概率不是永久修改，但最终确实能同步过来就是了；
+- 路径思考：我用YUYV存摄像头数据，存下来之后转成RGB在屏幕上显示实时画面，之后拍照我又要把这个RGB转到JPEG存起来，那为什么我不干脆一开始就用JPEG存摄像头数据，然后转成RGB在屏幕上显示，拍照的时候我就直接把转成RGB之前的JPEG数据存起来，这样不是更方便么，用我现在的这种方式还要多一个RGB->JPEG的步骤，用libjpeg，这样看起来更繁琐；后面稍微了解了一下就知道，YUYV转RGB相对容易，耗时也低，如果换成一开始就用JPEG的话当然也可以，但是光conv一项就要比现在多花很多时间，并且是压缩画质，所以也有它的局限性；——目前做到我这个程度，后面要么用libjpeg把rgb转成jpeg存图，要么是别的办法，这里因为我之前已经做过test_Get_pictures的逻辑，已经能存图，所以可以在收到拍照信号时转变流程，由之前的预览的路径切到拍照的路径，这样就行了，延迟也可以接受，正好还可以乘机把test_camera_preview里庞大的代码量压缩，抽一个camera.c出来复用；
+
+
+
+
+
+
+
+
+
+
 
 
 

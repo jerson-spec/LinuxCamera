@@ -66,6 +66,8 @@ static int on_key(void *user, const char *section,
             return parse_int(value, 0, 100000, &c->save_count);
         if (!strcmp(name, "save_dir"))
             return copy_str(c->save_dir, sizeof(c->save_dir), value);
+		if (!strcmp(name, "save_format"))
+            return copy_str(c->save_format, sizeof(c->save_format), value);
     }
 	  else if (!strcmp(section, "log")) {
         if (!strcmp(name, "log_level"))
@@ -111,6 +113,7 @@ static void set_defaults(app_config_t *c)
     c->save_count = 50;
 	c->flag = 1;
     snprintf(c->save_dir, sizeof(c->save_dir), "%s", "./images");
+    snprintf(c->save_format, sizeof(c->save_format), "%s", "MJPEG");
 	
 	snprintf(c->log_level, sizeof(c->log_level), "%s", "DEBUG");
  	snprintf(c->log_file, sizeof(c->log_file), "%s", "./camera.log");
@@ -148,7 +151,7 @@ int config_load(const char *path, app_config_t *c)
         c->format[0] == '\0' ||
         c->save_dir[0] == '\0' ||
         c->width < 16 || c->height < 16 ||
-        c->buffers < 2 || c->buffers > 8 ||
+        c->buffers < 2 || c->buffers > 8 || c->save_format[0] == '\0' ||
         c->save_count < 0 || ((c->flag != 0) && (c->flag != 1)) ||
         c->log_file[0] == '\0' || c->log_level[0] == '\0' || c->lcd_device[0] == '\0' || 
         c->lcd_display_size <= 0 || c->lcd_display_size >= 10 || c->lcd_log_file[0] == '\0' ||
@@ -172,6 +175,7 @@ void config_print(const app_config_t *c)
 	
     printf("save_count = %d\n", c->save_count);
     printf("save_dir   = %s\n", c->save_dir);	
+    printf("save_format= %s\n", c->save_format);	
 
 	printf("log_level  = %s\n",c->log_level);
 	printf("log_file   = %s\n",c->log_file);

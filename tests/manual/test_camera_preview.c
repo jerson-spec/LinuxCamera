@@ -23,7 +23,10 @@
 #include "log.h"
 
 static int camera_fd = -1;
+//static char filename[512];
+
 static volatile sig_atomic_t g_stop = 0;
+static volatile sig_atomic_t g_save = 0;
 
 
 /* 返回当前进程的 VmRSS，单位 kB；失败返回 -1 */
@@ -47,6 +50,7 @@ static long get_vmrss_kb(void)
     return kb;
 }
 
+/* 获取自系统启动以来时间 */
 static double get_time_ms(void)
 {
 	struct timespec ts;
@@ -64,6 +68,33 @@ static void on_sigint(int sig)
 {
     (void)sig;
     g_stop = 1;         
+}
+
+static void on_sigusr1(int sig)
+{
+    (void)sig;
+    g_save = 1;         
+}
+
+static int snapshot_save(char* path, unsigned char* rgbbuf,int w,int h)
+{
+	int file_fd;
+	file_fd = open(path , O_RDWR | O_CREAT | O_TRUNC, 0666);
+	if(file_fd < 0)
+	{
+		LOG_ERROR("can not open snapshot file: %s",path);
+		return -1;
+	}
+	
+	if((size_t)write(file_fd, rgbbuf, (size_t)w *(size_t) h * 3) != (size_t)w *(size_t) h * 3)
+	{
+		LOG_ERROR("Short write error");
+		close(file_fd);
+		return -1;
+	}
+		
+	close(file_fd);
+	return 0;
 }
 
 static void Wrapping_up(unsigned char* buf)
@@ -232,17 +263,24 @@ int main(int argc,char**argv)
 	struct v4l2_streamparm parm;
 	memset(&parm, 0, sizeof(parm));
 	parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	if (ioctl(camera_fd, VIDIOC_G_PARM, &parm) == 0 &&
-	(parm.parm.capture.capability & V4L2_CAP_TIMEPERFRAME)) {
-	parm.parm.capture.timeperframe.numerator= 1;
-	parm.parm.capture.timeperframe.denominator = 30;
-	if (ioctl(camera_fd, VIDIOC_S_PARM, &parm) < 0)
-	LOG_WARN("S_PARM 30fps failed: %s", strerror(errno));
-	}
-	else if (ioctl(camera_fd, VIDIOC_S_PARM, &parm) == 0)
-    LOG_INFO("capture fps: %u/%u",
-             parm.parm.capture.timeperframe.numerator,
+	if (ioctl(camera_fd, VIDIOC_G_PARM, &parm) == 0 && (parm.parm.capture.capability & V4L2_CAP_TIMEPERFRAME))
+	{
+		parm.parm.capture.timeperframe.numerator= 1;
+		parm.parm.capture.timeperframe.denominator = 30;
+		
+		if (ioctl(camera_fd, VIDIOC_S_PARM, &parm) < 0)
+			LOG_WARN("S_PARM 30fps failed: %s", strerror(errno));
+		else 
+		{
+			if(ioctl(camera_fd, VIDIOC_G_PARM, &parm) == 0)
+				LOG_INFO("capture fps: %u/%u",parm.parm.capture.timeperframe.numerator,
              parm.parm.capture.timeperframe.denominator);
+			else
+				LOG_WARN("get PARM after set fail");
+		}
+	}
+	else
+		LOG_WARN("driver does not support timeperframe");	
 
 	/** 检查stride **/
 	if(vfmt.fmt.pix.bytesperline == vfmt.fmt.pix.width * 2)
@@ -345,14 +383,32 @@ int main(int argc,char**argv)
 	}
 
 	/** 注册信号处理函数 **/
-	if (signal(SIGINT, on_sigint) == SIG_ERR) {
-    	perror("signal");
+	struct sigaction sa;
+	memset(&sa , 0 , sizeof(sa));
+	
+    sa.sa_handler = on_sigusr1;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+
+    if (sigaction(SIGUSR1, &sa, NULL) == -1) {
+        perror("sigaction SIGUSR1");
 		for (i = 0; i < camera_cfg.buffers; i++) {
 	        	munmap(mem[i], buf_length[i]);
 		}
 		Wrapping_up(NULL);
-		return -1;
-	}
+        return -1;
+    }
+	
+	//memset(&sa , 0 , sizeof(sa));
+    sa.sa_handler = on_sigint;
+	if (sigaction(SIGINT, &sa, NULL) == -1) {
+        perror("sigaction SIGINT");
+		for (i = 0; i < camera_cfg.buffers; i++) {
+	        	munmap(mem[i], buf_length[i]);
+		}
+		Wrapping_up(NULL);
+        return -1;
+    }	
 
 	/** 分配rgbbuf空间并置初值0 **/
 	w = vfmt.fmt.pix.width;
@@ -371,6 +427,24 @@ int main(int argc,char**argv)
 		return -1;
 	}
 	memset(rgbbuf , 0 , size);
+
+	/** 创建拍照存图目录、文件名后缀处理 **/	
+	struct timespec ts;
+	struct tm tm;
+    char tbuf[32];
+	char filename[512];
+	
+	//const char *ext = (!strcasecmp(camera_cfg.save_format, "YUYV")) ? "yuv" : "jpg";
+	const char *ext = "rgb";
+	
+    if (mkdir(camera_cfg.save_dir, 0755) < 0 && errno != EEXIST) {
+        perror("mkdir");
+		for (i = 0; i < camera_cfg.buffers; i++) {
+       	 	munmap(mem[i], buf_length[i]);
+		}
+		Wrapping_up(NULL);
+        return -1;
+    }
 		
 	/* 监听有数据可读 */
 	struct pollfd fds[1];
@@ -525,6 +599,27 @@ int main(int argc,char**argv)
 				wait_time = conv_time = draw_time = n = 0;
 			}
 
+			/** 拍照存图 **/
+			double t_shot_s;
+			double t_shot_e;
+			
+			if(g_save)
+			{
+				t_shot_s = get_time_ms();
+				clock_gettime(CLOCK_REALTIME, &ts);
+			    localtime_r(&ts.tv_sec, &tm);
+			    strftime(tbuf, sizeof(tbuf), "%Y%m%d_%H%M%S", &tm);
+				
+				sprintf(filename,"%s/IMG_%s.%s",camera_cfg.save_dir,tbuf,ext);	
+				if(snapshot_save(filename, rgbbuf, w , h) < 0)
+				{
+					LOG_WARN("save snapshot error, continue");
+				}
+				t_shot_e = get_time_ms();
+				LOG_INFO("snapshot: %s (%u bytes, %.0f ms)",filename,(size_t)w *(size_t) h * 3, t_shot_e - t_shot_s);
+				g_save = 0;
+			}
+			
 			/** double buffering choice **/
 			if(lcd_doublebuffering_on())
 			{
@@ -532,7 +627,6 @@ int main(int argc,char**argv)
 				{
 					LOG_ERROR("line: %d , lcd filp error",__LINE__);
 					LOG_INFO("double buffering downgrade --> single buffering");
-					continue;
 				}
 			}
 		}

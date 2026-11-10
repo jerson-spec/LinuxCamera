@@ -7,9 +7,10 @@ typedef struct {
     int  height;
     char format[8];
     int  buffers;
+	int  flag;
     int  save_count;
     char save_dir[256];
-	int flag;
+    char save_format[8];
 	char log_level[16];
 	char log_file[256];
 	
