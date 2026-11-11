@@ -20,6 +20,7 @@ for bin in "${BINARIES[@]}"; do
 done
 
 adb push "$ROOT_DIR/config/." "$BOARD_DIR/config/"
+adb push "$ROOT_DIR/scripts/setup_env.sh" "$BOARD_DIR/scripts/setup_env.sh"
 
 adb shell "chmod +x \
     '$BOARD_DIR/test_Get_images' \
