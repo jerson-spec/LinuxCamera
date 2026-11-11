@@ -309,3 +309,52 @@ yuyv: hoist chroma terms per pixel pair, inline clamp, drop memcpy (conv 25.9 ->
    camera: extract camera.c from test_camera_preview.c_Problematic edits
   ```
 
+
+
+# [ camera: refactor__ai，scripts: add board bash file ]——26_11_11
+
+- 交由ai修改了camera.c,.h，test_camera_preview.c文件，按照上面的问题对应修改，我做审查后上机实验，结果正常，提交至git，注意到代码中多处使用goto但并没有滥用，可以接受；
+
+- 把板子上常用的指令抽成一个setup_env.sh文件：CPU 调频 + tty0 输出 + 时区配置；
+
+  code -> git : 
+
+  ```
+   camera: refactor__ai，scripts: add board bash file
+  ```
+
+
+
+# [ camera: MJPEG snapshot via format switch ]——26_11_11
+
+
+- **`buf.sequence` 要归零**：`STREAMON` 之后驱动重新计数，sequence 从 0 开始。代码现在的情况是：
+
+  ```
+  if (have_sequence && (buf.sequence - last_sequence) > 1)
+      dropped += buf.sequence - last_sequence - 1;
+      have_sequence = 1;
+  	last_sequence = buf.sequence;
+  ```
+
+  如果拍照后不把 `have_sequence` 清零，下一帧会算出 `0 - 1830 - 1`（无符号回绕）→ `dropped` 瞬间几百万。**拍照后必须 `have_sequence = 0`。**
+
+- **`camera_dequeue()` 是阻塞的，要先 `poll`**：现在的 `camera_dequeue` 直接 `ioctl(DQBUF)`。主循环里前面有 `poll`，所以不阻塞；但拍照时是新起的流，如果摄像头卡住（比如切格式后第一帧迟迟不来），`DQBUF` 会**永远阻塞**，Ctrl-C 都退不出来。所以拍照路径必须先 `poll` 带超时。
+
+- **恢复必须无条件执行**：`goto restore` 的意义就在这：不管 MJPG 起流成功没有、取帧成功没有，最后都要退回 YUYV 并重新起流。否则程序会停在“相机是 MJPG、循环按 YUYV 解析”的状态——画面花屏、`bytesused` 检查失败。
+
+- **恢复后重新申请帧率**：切格式可能把 `S_PARM` 的设置冲掉（不同驱动行为不同）。恢复 YUYV格式后再调一次 `camera_set_fps(cam, 1, 30)`能保证 640×480 下还是 30fps。
+
+- 其余见performance.md 中“2026-11-11：MJPEG 拍照跑通”一栏；
+
+  code -> git : 
+
+  ```
+  camera: MJPEG snapshot via format switch
+  ```
+
+  ```
+  tag: mjpeg-snapshot-milestone
+  ```
+
+  

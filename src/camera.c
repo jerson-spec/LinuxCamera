@@ -141,6 +141,21 @@ int camera_set_format(camera_t *cam, unsigned int width, unsigned int height,
 	return 0;
 }
 
+int camera_set_fps_if_needed(camera_t *cam, unsigned int num, unsigned int den)
+{
+	struct v4l2_streamparm parm;
+	
+	memset(&parm, 0, sizeof(parm));
+	parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
+	if(ioctl(cam->fd, VIDIOC_G_PARM, &parm)== 0 && parm.parm.capture.timeperframe.numerator == num 
+		&& parm.parm.capture.timeperframe.denominator == den){
+		return 0;
+	}
+	
+	return camera_set_fps(cam, num ,den);
+}
+
 int camera_set_fps(camera_t *cam, unsigned int num, unsigned int den)
 {
 	struct v4l2_streamparm parm;

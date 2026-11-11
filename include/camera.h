@@ -30,7 +30,9 @@ int camera_open(camera_t *cam, const char *dev);
 int camera_set_format(camera_t *cam, unsigned int width, unsigned int height,
                       unsigned int pixfmt);
 
-/* 请求帧率，尽力而为；驱动不支持时返回 -1，调用者可忽略 */
+int camera_set_fps_if_needed(camera_t *cam, unsigned int num, unsigned int den);
+
+/* 请求帧率，尽力而为；驱动不支持时返回 -1，调用者可忽略 */					  
 int camera_set_fps(camera_t *cam, unsigned int num, unsigned int den);
 
 /* REQBUFS + mmap + QBUF + STREAMON；失败会回滚 */

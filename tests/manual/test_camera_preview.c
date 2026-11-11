@@ -103,6 +103,82 @@ static int snapshot_save(const char *path, const unsigned char *data, size_t len
 }
 
 /*
+ * 返回值：
+ *   0  拍照成功，预览已恢复
+ *   1  拍照失败，但预览已恢复（可以继续跑）
+ *  -1  预览恢复失败（必须退出）
+ */
+static int snapshot_mjpeg(camera_t *cam,const app_config_t *cfg,const char *path,size_t *out_len)
+{
+	struct v4l2_buffer buf;
+	struct pollfd pfd;
+	size_t n;
+	int ret = 1;
+	
+	/* camera_stop */
+	camera_stop(cam);
+	
+	/* set format: jpeg */
+	if(camera_set_format(cam, (int)cam->width,(int)cam->height, V4L2_PIX_FMT_MJPEG) < 0){
+		goto restore;
+	}
+	/* camera_start */
+	if(camera_start(cam, cfg->buffers) < 0){
+		goto restore;
+	}	
+
+	pfd.fd = cam->fd;
+	pfd.events = POLLIN;
+	if(poll(&pfd , 1 , 2000) <= 0){
+		LOG_ERROR("snapshot: poll timeout");
+		goto stop;
+	}
+	
+	/* camera_dequeue */
+	if(camera_dequeue(cam, &buf) < 0){
+		goto stop;
+	}
+	
+	n = buf.bytesused;
+	if(n == 0){
+		LOG_ERROR("snapshot: empty frame");
+		camera_queue(cam, &buf);
+		goto stop;
+	}
+
+	/* 处理 */
+	if(snapshot_save(path, cam->mem[buf.index], n )< 0){
+		camera_queue(cam,&buf);
+		goto stop;
+	}
+	camera_queue(cam,&buf);
+	*out_len = n;
+	ret = 0;
+	
+stop:
+	camera_stop(cam);
+
+restore:
+	if(camera_set_format(cam, (int)cam->width,(int)cam->height, V4L2_PIX_FMT_YUYV) < 0 ){
+		ret = -1;
+		goto restore_fail;
+	}
+		
+	camera_set_fps_if_needed(cam, 1, 30);
+
+	if(camera_start(cam, cfg->buffers) < 0){
+		ret = -1;
+		goto restore_fail;
+	}
+restore_fail:
+	if(ret == -1)
+		LOG_ERROR("snapshot: failed to restore preview");
+	
+	return ret;
+}
+
+
+/*
  *	./test_camera_preview [path/camera.ini] [path/lcd.ini]
  */
 int main(int argc, char **argv)
@@ -139,7 +215,7 @@ int main(int argc, char **argv)
 
 	char tbuf[32];
 	char filename[512];
-	const char *ext = "rgb";	/* 目前写的是 RGB888 裸数据，等 MJPEG 拍照接入后改成 jpg */
+	const char *ext = "jpg";	/* 目前写的是 RGB888 裸数据，等 MJPEG 拍照接入后改成 jpg */
 
 	memset(&cam, 0, sizeof(cam));
 	cam.fd = -1;
@@ -261,11 +337,12 @@ int main(int argc, char **argv)
 	fds[0].events = POLLIN;
 
 	last_t0 = get_time_ms();
+	int timeout_ms = (frames == 0)? 5000 : 2000; 
 	while (!g_stop) {
 		fds[0].revents = 0;
 		t0 = get_time_ms();
 
-		ret = poll(fds, 1, 2000);
+		ret = poll(fds, 1, timeout_ms);
 		if (ret == 0) {
 			LOG_WARN("poll timeout");
 			poll_timeout_cnt++;
@@ -370,6 +447,7 @@ int main(int argc, char **argv)
 
 		/* 拍照：触发源只是置标志，真正处理在循环里 */
 		if (g_save) {
+			int r;
 			double t_shot_s = get_time_ms();
 
 			clock_gettime(CLOCK_REALTIME, &ts);
@@ -378,14 +456,23 @@ int main(int argc, char **argv)
 			snprintf(filename, sizeof(filename), "%s/IMG_%s.%s",
 			         camera_cfg.save_dir, tbuf, ext);
 
-			shot_len = (size_t)cam.width * (size_t)cam.height * 3;
-			if (snapshot_save(filename, rgbbuf, shot_len) < 0) {
-				LOG_WARN("snapshot failed, keep previewing");
-			} else {
-				LOG_INFO("snapshot: %s (%lu bytes, %.0f ms)",
-				         filename, (unsigned long)shot_len,
-				         get_time_ms() - t_shot_s);
-			}
+			r = snapshot_mjpeg(&cam, &camera_cfg, filename, &shot_len);
+
+		    /* 关键：重新起流后 buf.sequence 归零 */
+		    have_sequence = 0;
+		    poll_timeout_cnt = 0;
+
+		    if (r < 0) {
+		        exit_code = -9;
+		        g_save = 0;
+		        break;
+		    }
+		    if (r == 0)
+		        LOG_INFO("snapshot: %s (%lu bytes, %.0f ms)",
+		                 filename, (unsigned long)shot_len, get_time_ms() - t_shot_s);
+		    else
+		        LOG_WARN("snapshot failed, preview restored");
+			
 			g_save = 0;
 		}
 
