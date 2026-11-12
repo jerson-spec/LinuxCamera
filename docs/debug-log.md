@@ -357,4 +357,29 @@ yuyv: hoist chroma terms per pixel pair, inline clamp, drop memcpy (conv 25.9 ->
   tag: mjpeg-snapshot-milestone
   ```
 
-  
+
+
+
+# [ camera: runtime resolution switch ]——26_11_12
+
+- 一开始res_switch(camera_t *cam , const app_config_t *cfg , res_switch_t *res_switch_p , unsigned char** rgbbuf_p , letterbox_t *lb_p)里rgbbuf_p是写的 unsigned char * rgbbuf，然后下面在函数里memset(rgbbuf , 0 , (size_t)w * (size_t)h * 3 )，这样没问题，确实可以把传进来的rgbbuf这块空间清零，但是紧接着下面又size = (size_t)cam->width * (size_t)cam->height * 3;  rgbbuf= malloc(size);，这样就不对了，这样相当于把malloc出来的空间赋给形参盖住了之前本来保存的外部调用函数中rgbbuf的地址，这样以后就和外部函数没有任何关联了，而这块malloc出来给内部形参rgbbuf的空间呢，也会在函数调用结束后自动释放，所以这条语句错误，不起任何作用；正确的做法要么是到外部申请rgbbuf空间，要么坚持在res_switch函数里做，但要把unsigned char*rgbbuf改成unsigned char **rgbbuf_p，然后malloc出来的空间给 *rgbbuf_p，这样就可以实现目的了，如果理解不过来可以画图表示：
+
+![二级指针赋值](D:\Desktop\.hidden\WorkSpace\DSH\LinuxCamera\docs\pic\二级指针赋值.png)
+
+- 上面所述这个问题是最严重的一个问题，其余还有一些小问题，审查一遍代码后都能改过来，另外关于res_switch函数中各个部分的执行次序的问题，比较合理的是：成功后一次性提交状态、目标分辨率比屏幕大的判断放在启动流之前，最好是一开始的位置、初始时判断预设值与当前值如果相同直接返回成功减少计算等......；
+
+- 另外把lcd.c里用到的变量抽成了两个结构体：lcd_t、letterbox_t，并在lcd.c中新增lcd_clear清屏函数，在test_camera_preview.c中res_switch函数最后成功切换分辨率、启动流后调用；
+
+- 还有关于while循环里有poll，res_switch函数里也有poll，看起来重复的问题，实际上res_switch函数里的poll承担了主函数承担不了的**失败检测**、**回滚**的功能，具体见obsidain；
+
+- 这样之后上机实验，新开一个终端kill -USR1 < pid >和kill -USR2 < pid >发信号就都能成功实现理想的效果：拍照存图jpg、切换分辨率：800*600 -> 640 * 480，另外注意到 640 * 480下存图耗时是460,470ms左右，而800*600下大约是800ms，这是正常的：帧大、切流后首帧等待也更长，其余关于实验结果的内容见performance.md对应章节；
+
+  code -> git : 
+
+  ```
+  camera: runtime resolution switch
+  ```
+  ```
+  tag: resolution-switch-milestone
+  ```
+

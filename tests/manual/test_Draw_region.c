@@ -5,8 +5,8 @@
 #include "log.h"
 #include "lcd.h"
 
-struct fb_fix_screeninfo lcd_fix_screeninfo;
-struct fb_var_screeninfo lcd_var_screeninfo;
+static struct fb_fix_screeninfo lcd_fix_screeninfo;
+static struct fb_var_screeninfo lcd_var_screeninfo;
 
 
 /*

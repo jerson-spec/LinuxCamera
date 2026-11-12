@@ -26,6 +26,12 @@
 
 static volatile sig_atomic_t g_stop = 0;
 static volatile sig_atomic_t g_save = 0;
+static volatile sig_atomic_t g_res = 0;
+
+typedef struct {
+	unsigned int width;
+	unsigned int height;
+}res_switch_t;
 
 /* 返回当前进程的 VmRSS，单位 kB；失败返回 -1 */
 static long get_vmrss_kb(void)
@@ -73,6 +79,13 @@ static void on_sigusr1(int sig)
 	g_save = 1;
 }
 
+static void on_sigusr2(int sig)
+{
+	(void)sig;
+	g_res = 1;
+}
+
+
 /* 把一段内存原样写到文件；处理部分写和 EINTR */
 static int snapshot_save(const char *path, const unsigned char *data, size_t len)
 {
@@ -100,6 +113,110 @@ static int snapshot_save(const char *path, const unsigned char *data, size_t len
 
 	close(fd);
 	return 0;
+}
+
+/*
+ * 返回值：
+ *   0  转换成功，预览已恢复
+ *   1  转换失败，但预览已恢复（可以继续跑）
+ *  -1  预览恢复失败（必须退出）
+ */
+static int res_switch(camera_t *cam,const app_config_t *cfg,res_switch_t *res_switch_p,
+			unsigned char **rgbbuf_p,letterbox_t *lb_p)
+{
+	int ret = 1;
+	size_t size;
+	struct pollfd pfd;
+	struct fb_var_screeninfo lcd_var_screeninfo;
+	unsigned char* newbuf = NULL;
+	
+	unsigned int width  = res_switch_p->width;
+	unsigned int height = res_switch_p->height;
+	
+	unsigned int restore_width  = cam->width;
+	unsigned int restore_height = cam->height;
+
+	if (cam->width == width && cam->height == height)
+			return 0;
+
+	Get_lcd_parameters(NULL, &lcd_var_screeninfo);
+
+	if ((int)width > (int)lcd_var_screeninfo.xres || (int)height > (int)lcd_var_screeninfo.yres) {
+        LOG_ERROR("res_switch: %ux%u larger than screen %ux%u",
+                  width, height, lcd_var_screeninfo.xres, lcd_var_screeninfo.yres);
+        return 1;
+    }
+
+	/* camera_stop */
+	camera_stop(cam);
+
+	/* set format: width * height */
+	if(camera_set_format(cam, (int)width,(int)height, cam->pixfmt) < 0){
+		goto restore;
+	}
+		
+	if (lb_p->x_offset < 0 || lb_p->y_offset < 0) {
+		LOG_ERROR("camera %ux%u larger than screen %ux%u",cam->width, cam->height, 
+				lcd_var_screeninfo.xres, lcd_var_screeninfo.yres);
+		goto restore;	
+	}
+	
+	/* 重新申请 RGB 缓冲 */
+	size = (size_t)cam->width * (size_t)cam->height * 3;
+	newbuf = malloc(size);
+	if (newbuf == NULL) {
+		LOG_ERROR("malloc rgb buffer (%lu bytes): %s",
+		          (unsigned long)size, strerror(errno));
+		goto restore;
+	}
+	memset(newbuf, 0, size);
+	
+	camera_set_fps_if_needed(cam, 1, 30);
+	
+	/* camera_start */
+	if(camera_start(cam, cfg->buffers) < 0){
+		goto restore;
+	}	
+
+	pfd.fd = cam->fd;
+	pfd.events = POLLIN;
+	if(poll(&pfd , 1 , 5000) <= 0 || !(pfd.revents & POLLIN)){
+		LOG_ERROR("res_switch: poll error");
+		goto stop;
+	}
+
+	/* 更新 offset、rgbbuf */	
+	lb_p->x_offset = ((int)lcd_var_screeninfo.xres - (int)cam->width) / 2;
+	lb_p->y_offset = ((int)lcd_var_screeninfo.yres - (int)cam->height) / 2;
+	
+	free(*rgbbuf_p);
+	*rgbbuf_p = newbuf;
+	newbuf = NULL;
+	
+	lcd_clear();
+	return 0;
+	
+stop:
+	camera_stop(cam);
+	
+restore:
+	free(newbuf);
+	if(camera_set_format(cam, (int)restore_width,(int)restore_height, cam->pixfmt) < 0 ){
+		ret = -1;
+		goto restore_fail;
+	}
+		
+	camera_set_fps_if_needed(cam, 1, 30);
+
+	if(camera_start(cam, cfg->buffers) < 0){
+		ret = -1;
+		goto restore_fail;
+	}
+restore_fail:
+	if(ret == -1)
+		LOG_ERROR("res_switch: failed to restore preview");
+
+	return ret;
 }
 
 /*
@@ -188,8 +305,6 @@ int main(int argc, char **argv)
 	int exit_code = 0;
 	int lcd_ok = 0;
 	int poll_timeout_cnt = 0;
-	int x0 = 0;
-	int y0 = 0;
 
 	struct fb_var_screeninfo lcd_var_screeninfo;
 	struct pollfd fds[1];
@@ -198,6 +313,7 @@ int main(int argc, char **argv)
 	struct tm tm;
 
 	camera_t cam;
+	letterbox_t lb;
 	unsigned char *rgbbuf = NULL;
 	size_t size = 0;
 	size_t shot_len = 0;
@@ -221,6 +337,8 @@ int main(int argc, char **argv)
 	cam.fd = -1;
 	memset(&camera_cfg, 0, sizeof(camera_cfg));
 	memset(&lcd_cfg, 0, sizeof(lcd_cfg));
+	memset(&lb, 0, sizeof(lb));
+	
 
 	dq = q = frames = 0;
 	last_sequence = have_sequence = dropped = 0;
@@ -289,9 +407,10 @@ int main(int argc, char **argv)
 	(void)camera_set_fps(&cam, 1, 30);	/* 尽力而为，失败不影响预览 */
 
 	/* 居中偏移只和分辨率、屏幕有关，算一次就够 */
-	x0 = ((int)lcd_var_screeninfo.xres - (int)cam.width) / 2;
-	y0 = ((int)lcd_var_screeninfo.yres - (int)cam.height) / 2;
-	if (x0 < 0 || y0 < 0) {
+	lb.x_offset = ((int)lcd_var_screeninfo.xres - (int)cam.width) / 2;
+	lb.y_offset = ((int)lcd_var_screeninfo.yres - (int)cam.height) / 2;
+	
+	if (lb.x_offset < 0 || lb.y_offset < 0) {
 		LOG_ERROR("camera %ux%u larger than screen %ux%u",
 		          cam.width, cam.height,
 		          lcd_var_screeninfo.xres, lcd_var_screeninfo.yres);
@@ -306,6 +425,12 @@ int main(int argc, char **argv)
 	sa.sa_flags = SA_RESTART;
 	if (sigaction(SIGUSR1, &sa, NULL) < 0) {
 		LOG_ERROR("sigaction SIGUSR1: %s", strerror(errno));
+		exit_code = -1;
+		goto cleanup;
+	}
+	sa.sa_handler = on_sigusr2;
+	if (sigaction(SIGUSR2, &sa, NULL) < 0) {
+		LOG_ERROR("sigaction SIGUSR2: %s", strerror(errno));
 		exit_code = -1;
 		goto cleanup;
 	}
@@ -416,7 +541,7 @@ int main(int argc, char **argv)
 
 			/* 3. 上屏（按行写，letterbox 居中） */
 			for (i = 0; i < (int)cam.height; i++) {
-				if (lcd_write_line_rgb888(y0 + i, x0,
+				if (lcd_write_line_rgb888(lb.y_offset + i, lb.x_offset,
 				                          rgbbuf + (size_t)i * 3 * (size_t)cam.width,
 				                          (int)cam.width) < 0) {
 					LOG_ERROR("lcd_write_line_rgb888 failed at line %d", i);
@@ -475,7 +600,28 @@ int main(int argc, char **argv)
 			
 			g_save = 0;
 		}
+		if(g_res){
+			int r;
+			res_switch_t res_sw = {640,480};
+			double t_switch_s = get_time_ms();
+			r = res_switch(&cam, &camera_cfg, &res_sw, &rgbbuf,&lb);
 
+			have_sequence = 0;
+		    poll_timeout_cnt = 0;
+			
+			 if (r < 0) {
+		        exit_code = -10;
+		        g_res = 0;
+		        break;
+		    }
+			if(r == 0)
+				LOG_INFO("res switch to %u*%u ( %.0f ms)",
+		                 res_sw.width, res_sw.height, get_time_ms() - t_switch_s);
+			 else
+		        LOG_WARN("res switch failed, preview restored");
+			 
+			 g_res = 0;
+		}
 		/* 双缓冲切页 */
 		if (lcd_doublebuffering_on() && lcd_flip() < 0)
 			LOG_ERROR("lcd_flip failed, single buffer fallback");

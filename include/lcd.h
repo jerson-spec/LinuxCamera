@@ -4,7 +4,22 @@
 #include <linux/fb.h>
 #include "config.h"
 
+typedef struct{
+	int fd;
+	struct fb_fix_screeninfo lcd_fix_screeninfo_t;
+	struct fb_var_screeninfo lcd_var_screeninfo_t;
+	unsigned int lcd_size;
+	unsigned int draw_offset;
+	int Is_lcd_doublebuffering;
+}lcd_t;
+
+typedef struct{
+	int x_offset;
+	int y_offset;
+}letterbox_t;
+
 int lcd_init(char* lcd_cfg_path , app_config_t *lcd_cfg_p);
+int lcd_clear(void);
 int lcd_deinit(void);
 
 int lcd_doublebuffering_on(void);
