@@ -364,7 +364,7 @@ yuyv: hoist chroma terms per pixel pair, inline clamp, drop memcpy (conv 25.9 ->
 
 - 一开始res_switch(camera_t *cam , const app_config_t *cfg , res_switch_t *res_switch_p , unsigned char** rgbbuf_p , letterbox_t *lb_p)里rgbbuf_p是写的 unsigned char * rgbbuf，然后下面在函数里memset(rgbbuf , 0 , (size_t)w * (size_t)h * 3 )，这样没问题，确实可以把传进来的rgbbuf这块空间清零，但是紧接着下面又size = (size_t)cam->width * (size_t)cam->height * 3;  rgbbuf= malloc(size);，这样就不对了，这样相当于把malloc出来的空间赋给形参盖住了之前本来保存的外部调用函数中rgbbuf的地址，这样以后就和外部函数没有任何关联了，而这块malloc出来给内部形参rgbbuf的空间呢，也会在函数调用结束后自动释放，所以这条语句错误，不起任何作用；正确的做法要么是到外部申请rgbbuf空间，要么坚持在res_switch函数里做，但要把unsigned char*rgbbuf改成unsigned char **rgbbuf_p，然后malloc出来的空间给 *rgbbuf_p，这样就可以实现目的了，如果理解不过来可以画图表示：
 
-![二级指针赋值](D:\Desktop\.hidden\WorkSpace\DSH\LinuxCamera\docs\pic\二级指针赋值.png)
+![二级指针赋值](pic/二级指针赋值.png)
 
 - 上面所述这个问题是最严重的一个问题，其余还有一些小问题，审查一遍代码后都能改过来，另外关于res_switch函数中各个部分的执行次序的问题，比较合理的是：成功后一次性提交状态、目标分辨率比屏幕大的判断放在启动流之前，最好是一开始的位置、初始时判断预设值与当前值如果相同直接返回成功减少计算等......；
 
@@ -381,5 +381,19 @@ yuyv: hoist chroma terms per pixel pair, inline clamp, drop memcpy (conv 25.9 ->
   ```
   ```
   tag: resolution-switch-milestone
+  ```
+
+
+
+# [ OSD:  real-time display of resolution and frame rate ]——26_11_12
+
+- 这一部分没遇到什么阻力，在linux-4.9.88内核里找到font_8x16.c字体文件，删掉里面从第126项往后的部分（一是用不上，二是往后的部分都不是UTF-8编码显示是乱码）做成项目里include下的font.h文件，之后新增osd.c和osd.h文件负责解析字符串并调用lcd_put_pixel函数绘制，我实现了osd_show_text函数（这里的知识在韦东山linux应用的教程中学过，所以进展起来有参照十分顺利，只不过他那里实现的是绘制一个ASCII字符，这里我们是实现绘制字符串——大同小异），然后在test_camera_preview文件中lcd_flip函数之前的位置调用osd_show_text（如果在他之后则osd绘制无法被显示），之后又让ai帮我新增了几个函数进一步丰富了osd功能；
+
+- 效果演示见performance.md；
+
+  code -> git : 
+
+  ```
+   OSD: real-time display of resolution and frame rate
   ```
 

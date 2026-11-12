@@ -24,6 +24,7 @@ add_library(camera_core STATIC
     src/lcd.c
     src/yuyv.c
     src/camera.c
+    src/osd.c
 )
 target_include_directories(camera_core PUBLIC
     include

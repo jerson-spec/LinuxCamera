@@ -23,6 +23,7 @@
 #include "yuyv.h"
 #include "log.h"
 #include "camera.h"
+#include "osd.h"
 
 static volatile sig_atomic_t g_stop = 0;
 static volatile sig_atomic_t g_save = 0;
@@ -328,7 +329,8 @@ int main(int argc, char **argv)
 	unsigned int last_sequence, have_sequence, dropped;
 	double t0, t1, t2, t3, last_t0;
 	double wait_time, conv_time, draw_time, n;
-
+	double fps = 0.0;
+	
 	char tbuf[32];
 	char filename[512];
 	const char *ext = "jpg";	/* 目前写的是 RGB888 裸数据，等 MJPEG 拍照接入后改成 jpg */
@@ -562,9 +564,9 @@ int main(int argc, char **argv)
 		/* 每秒统计 */
 		if ((t3 - last_t0) >= 1000.0) {
 			double dt = t3 - last_t0;
-
+			fps = n * 1000.0 / dt;
 			LOG_INFO("fps: %.1f, wait: %.1f, conv: %.1f, draw: %.1f, dropped: %u, rss: %ld kB",
-			         n * 1000.0 / dt, wait_time / n, conv_time / n, draw_time / n,
+			         fps, wait_time / n, conv_time / n, draw_time / n,
 			         dropped, get_vmrss_kb());
 			last_t0 = t3;
 			wait_time = conv_time = draw_time = n = 0;
@@ -622,6 +624,29 @@ int main(int argc, char **argv)
 			 
 			 g_res = 0;
 		}
+
+		/* osd 绘制 */
+		#if 1	//有阴影
+		char line[64];
+			
+		//osd_show_rect(lb.x_offset + 4, lb.y_offset + 4, 200, 40, 0x00000000); //底色
+		snprintf(line, sizeof(line), "res: %u*%u", cam.width, cam.height);
+		
+		osd_show_text_shadow(lb.x_offset + 8, lb.y_offset + 8,
+		                     (const unsigned char *)line, 0x00FFFFFF, 0x00000000);
+
+		snprintf(line, sizeof(line), "fps: %.1f  drop: %u", fps, dropped);
+		osd_show_text_shadow(lb.x_offset + 8, lb.y_offset + 8 + 18,
+		                     (const unsigned char *)line, 0x00FFFFFF, 0x00000000);		
+		#else	//无阴影
+		unsigned char osd_text[64];
+		snprintf((char*)osd_text,sizeof(osd_text), "res: %u*%u, fps: %.1f",cam.width,cam.height, fps);
+		
+		if(osd_show_text(lb.x_offset + 8, lb.y_offset + 8 ,
+			(const unsigned char *)osd_text, 0xffffff) < 0)
+			LOG_ERROR("osd_show_text failed");
+		#endif
+		
 		/* 双缓冲切页 */
 		if (lcd_doublebuffering_on() && lcd_flip() < 0)
 			LOG_ERROR("lcd_flip failed, single buffer fallback");
