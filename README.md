@@ -2,26 +2,24 @@
 
 基于 i.MX6ULL + Linux V4L2 的相机项目。
 
-> **当前状态：W3 完成（预览优化 + 多分辨率 + letterbox）**
+> **当前状态：v1.0（可用版）**
 >
 > 已实现：
 > - V4L2 MMAP 采集、格式/分辨率枚举、MJPEG 保存 JPEG
 > - ini 配置、分级日志、CMake 交叉编译、gdbserver 调试
 > - LCD framebuffer 打开、mmap、16bpp/32bpp 画像素
-> - YUYV → RGB（FULL / LIMIT）
-> - 合成 YUYV 色条上屏
-> - 摄像头 YUYV 单帧 → RGB → LCD（v0.1）
+> - YUYV → RGB（定点，FULL / LIMIT）
 > - 连续预览 + 双缓冲（FBIOPAN_DISPLAY）+ 每秒 FPS/耗时/丢帧/内存统计（v0.5）
-> - **定点转换 + 按行写 framebuffer：CPU 忙占比 98% → 34%（W3）**
-> - **640×480@30fps、letterbox 居中（W3）**
+> - 定点转换 + 按行写 framebuffer：CPU 忙占比 98% → 34%（W3）
+> - 多分辨率（800×600 / 640×480 / 352×288）+ letterbox 居中（W3）
+> - 触摸拍照、OSD、MJPEG 拍照存卡（v1.0）
+> - **8 小时长跑：610390 帧、0 错误、内存和 fd 都不增长（v1.0）**
 >
 > 尚未实现：
 > - 缩放（放大/缩小）
-> - 触摸拍照、JPEG 存卡、OSD
-> - 网络推流
-> - 8 小时稳定性
+> - 网络推流（v1.5）
+> - 开机自启 / 看门狗 / Buildroot 精简（v2.0）
 >
-> **当前不是 v1.0。**
 
 ---
 
@@ -62,12 +60,14 @@
 | 摄像头 YUYV 单帧 → LCD | ✅ v0.1 已验证 |
 | 连续预览 + 双缓冲（`FBIOPAN_DISPLAY`） | ✅ v0.5 已验证 |
 | FPS / 耗时 / 丢帧 / VmRSS 统计 | ✅ v0.5 已验证 |
-| 多分辨率（800×600@15 / 640×480@30） | ✅ 已验证 |
+| 多分辨率（800×600 / 640×480 / 352×288） | ✅ 已验证 |
 | letterbox 居中显示 | ✅ 已验证 |
+| 触摸拍照（左半边）/ 切分辨率（右半边） | ✅ v1.0 已验证 |
+| OSD（分辨率 / 帧率 / 丢帧） | ✅ v1.0 已验证 |
+| MJPEG 拍照存卡 | ✅ v1.0 已验证 |
+| 8 小时稳定性 | ✅ 610390 帧 / 0 错误 |
 | 缩放（放大/缩小） | ❌ 未实现 |
-| 触摸/按键拍照 | ❌ 未实现 |
-| OSD | ❌ 未实现 |
-| 网络推流 | ❌ 未实现 |
+| 网络推流 | ❌ v1.5 |
 
 ---
 
@@ -115,6 +115,22 @@
 - letterbox 居中显示已生效；
 - 暗光下摄像头会自动降帧（30→25），不是丢帧，详见 `docs/performance.md`。
 
+已验证（v1.0，8 小时长跑，2026-11-14）：
+
+| 指标 | 实测 |
+|---|---|
+| 时长 / 帧数 | 8 h 00 m / 610390 帧 |
+| 拍照 | 47 张（每 10 分钟一张），全部可打开 |
+| 分辨率切换 | 15 次，无花屏 |
+| ERROR / WARN / poll timeout | 0 / 0 / 0 |
+| VmRSS | 1472–6548 kB 摆动，VmHWM 7104 kB，无上升趋势 |
+| fd | 7，全程不变 |
+| 温度 | 68.1–70.6 ℃ |
+| dropped | 41 帧（0.0067%） |
+| 收尾 | DQbuf = Qbuf = Frames = 610390 |
+
+结论：多分辨率、letterbox、触摸拍照、JPEG 存卡、OSD、8 小时稳定，v1.0 的验收项全部达成。
+
 ---
 
 ## 数据流
@@ -150,17 +166,21 @@ lcd_put_pixel()
 /dev/fb0
 ```
 
-### 连续预览（v0.5）
+### 连续预览（v1.0）
 
 ```text
 while (!g_stop)
-    poll(2000ms)
+    poll(摄像头 fd, 触摸 fd, 2000ms)
+      → 触摸事件：左半边置拍照标志，右半边置切换标志
       → DQBUF
-      → yuyv_to_rgb()            [conv]
-      → QBUF（尽早归还，驱动继续采）
-      → lcd_put_pixel() × 480k   [draw]
-      → lcd_flip()               FBIOPAN_DISPLAY 切前后台
+      → yuyv_to_rgb()（定点，FULL/LIMIT）
+      → QBUF（尽早归还）
+      → 按行 lcd_write_line_rgb888(y0+i, x0, ...)   [draw]
+      → OSD：分辨率 / 帧率 / 丢帧 / 操作提示
+      → lcd_flip()   FBIOPAN_DISPLAY 切前后台
       → 每秒统计 fps / wait / conv / draw / dropped / VmRSS
+      → 拍照标志：切 MJPG 抓一帧存 jpg，再切回 YUYV
+      → 切换标志：轮换 800×600 / 640×480 / 352×288
 ```
 
 双缓冲要点：
@@ -212,7 +232,7 @@ LinuxCamera/
 │   ├── board.md
 │   ├── roadmap.md
 │   ├── handoff.md
-│   ├── handoff-prompt.md
+│   ├── release-v1.0.md
 │   ├── debug-log.md
 │   └── performance.md
 ├── scripts/
@@ -359,6 +379,7 @@ adb push build-arm/test_Get_images /root/LinuxCamera/
 adb push build-arm/test_Draw_region /root/LinuxCamera/
 adb push build-arm/test_Trans_YUYV /root/LinuxCamera/
 adb push build-arm/test_camera_preview /root/LinuxCamera/
+adb push scripts/soak_test.sh /root/LinuxCamera/
 
 adb push config/camera.ini /root/LinuxCamera/config/
 adb push config/lcd.ini /root/LinuxCamera/config/
@@ -370,7 +391,8 @@ adb push config/trans.ini /root/LinuxCamera/config/
 ```bash
 adb shell
 cd /root/LinuxCamera
-chmod +x test_Get_images test_Draw_region test_Trans_YUYV test_camera_preview
+sed -i 's/\r$//' soak_test.sh
+chmod +x test_Get_images test_Draw_region test_Trans_YUYV test_camera_preview soak_test.sh
 ```
 
 ---
@@ -508,7 +530,7 @@ save_count=20
 白 | 黄 | 青 | 绿 | 品红 | 红 | 蓝 | 黑
 ```
 
-### 5. 摄像头连续预览
+### 5. 摄像头连续预览（v1.0）
 
 `camera.ini`（默认）：
 
@@ -516,23 +538,43 @@ save_count=20
 format=YUYV
 width=1024
 height=600
+save_dir=./images
 ```
 
 运行：
 
 ```bash
+cd /root/LinuxCamera
 ./test_camera_preview
 ```
 
 预期：
 
 - 摄像头实际输出 800×600（请求 1024×600，驱动协商成 800×600）；
-- 画面在 LCD 上居中，左右各 112 像素黑边；
+- 画面居中，左上角 OSD 显示 `res / fps / drop / tap 提示`；
 - 每秒打印一行 `fps / wait / conv / draw / dropped / rss`；
+- 点屏幕**左半边**：拍一张 jpg 到 `images/`；
+- 点**右半边**：在 800×600 / 640×480 / 352×288 之间轮换；
 - 按 Ctrl-C 退出，收尾打印 `DQbuf = Qbuf = Frames`。
 
-想看 30fps，把 `width`/`height` 改成 640/480 再跑：摄像头在这个尺寸下支持 30fps，
-程序会用 `VIDIOC_S_PARM` 主动请求。暗光下自动曝光会自动降帧（30→25…），属于正常现象。
+不接屏幕也能测：
+
+```bash
+kill -USR1 <pid>   # 拍照
+kill -USR2 <pid>   # 切分辨率
+```
+
+暗光下自动曝光会主动降帧（30→25→20…），`dropped` 不变，属于正常现象。
+
+### 6. 长跑测试
+
+```bash
+nohup ./test_camera_preview >/dev/null 2>&1 &
+nohup ./soak_test.sh 8 >/dev/null 2>&1 &     # 8 小时；传 1 就是 1 小时
+```
+
+每 10 分钟拍一张、每 30 分钟切一次分辨率、每 60 秒记录 RSS/fd/温度，
+结果写在 `soak/` 下。8 小时的实测数据见 `docs/performance.md`。
 
 ---
 
@@ -636,59 +678,75 @@ p lcd_var_screeninfo_t
 1. 摄像头实际输出 800×600，LCD 1024×600，居中后左右各 112 像素黑边，正常；
 2. 800×600 下摄像头只有 15 fps；640×480 可以到 30 fps；
 3. 暗光下自动曝光会主动降帧（30→25→20…），不是丢帧；
-4. `lcd_write_line_rgb888()` 只支持 32bpp，其他 bpp 会直接返回失败；
-5. `yuyv_to_rgb()` 没有 `src_stride` 参数，当前仅支持 `bytesperline == width*2`；
-6. `yuyv.c` 使用全局 `full` 状态，依赖先调用 `Is_full_range()`；
-7. `app_config_t` 同时包含 camera/lcd/log/trans，偏大；
-8. `lcd_init()` 会把日志重定向到 `lcd.log`，`lcd_deinit()` 会关闭日志，所以 `camera.log` 基本是空的；
-9. 首帧延迟约 1–1.6 s（摄像头启动 + 曝光收敛）；
-10. 没有触摸/OSD/网络；没有单元测试/CI；
+4. 触摸屏驱动报的范围是 800×480，实际发的是 1024×600 坐标，代码里用 `touch_set_range()` 覆盖了；
+5. `lcd_write_line_rgb888()` 只支持 32bpp，其他 bpp 会直接返回失败；
+6. `yuyv_to_rgb()` 没有 `src_stride` 参数，当前仅支持 `bytesperline == width*2`；
+7. `yuyv.c` 使用全局 `full` 状态，依赖先调用 `Is_full_range()`；
+8. `app_config_t` 同时包含 camera/lcd/log/trans，偏大；
+9. `lcd_init()` 会把日志重定向到 `lcd.log`，`lcd_deinit()` 会关闭日志；
+10. 切到 800×600 固定要 1.7 s；首帧延迟约 1–1.6 s；
+11. 没有缩放、没有网络、没有单元测试/CI。
 
 ---
 
 ## Roadmap
 
-### v0.1
+### v0.1（已完成）
 
 - [x] V4L2 YUYV 采集
 - [x] YUYV → RGB
 - [x] LCD 单帧显示
-- [x] 实际 800×600，左上角 1:1 显示
+- [x] 实际 800×600，1:1 显示
 - [x] tag `v0.1`
 
-### v0.5
+### v0.5（已完成）
 
 - [x] 连续预览
 - [x] 双缓冲 + `FBIOPAN_DISPLAY`
 - [x] FPS / 耗时 / 丢帧 / VmRSS 统计
 - [x] 10 分钟不崩（604 s，9036 帧，0 丢帧）
 
-### W3 优化与适配（当前，2026-11-09）
+### W3 优化与适配（已完成）
 
 - [x] YUYV→RGB 定点化（conv 35.1 → 14.0 ms）
 - [x] 按行写 framebuffer（draw 30.6 → 8.6 ms）
 - [x] CPU 忙占比 98% → 34%
 - [x] 640×480@30 验证
 - [x] letterbox 居中
-- [ ] 里程碑标签
 
-### v1.0
+### v1.0（当前）
 
-- [x] 多分辨率（配置驱动）
+- [x] 多分辨率（800×600 / 640×480 / 352×288）
 - [x] letterbox
-- [ ] 触摸/按键拍照
-- [ ] JPEG 存卡
-- [ ] OSD
-- [ ] 8 小时稳定
+- [x] 触摸拍照（左半边）/ 切分辨率（右半边）
+- [x] JPEG 存卡（MJPEG 直存）
+- [x] OSD（分辨率 / 帧率 / 丢帧）
+- [x] 8 小时稳定（610390 帧，0 错误，RSS/fd 不增长）
 
-### 后续
+### v1.5（下一步）
 
 - [ ] MJPEG over HTTP
-- [ ] 分层重构
+- [ ] 手机/浏览器直接看
+- [ ] 单客户端先跑通，再考虑多客户端
+
+### v2.0
+
+- [ ] 分层重构（camera/display/osd 从测试程序里抽出来）
 - [ ] 单元测试
-- [ ] Buildroot 精简镜像
-- [ ] 开机自启
-- [ ] 看门狗
+- [ ] Buildroot 精简镜像、开机自启、看门狗
+- [ ] 内核/驱动方向：字符设备、I2C/Input、V4L2 驱动
+
+---
+
+## 版本
+
+当前 `v1.0`：
+
+- 能演示：实时预览（800×600@15 / 640×480@30）、letterbox 居中、触摸拍照、分辨率轮换、OSD；
+- 不能做：缩放、网络推流、开机自启；
+- 已知问题：见上面「已知限制」；
+- 构建/运行：见「构建」「运行」两节；
+- 长跑数据：见 `docs/performance.md` 的 2026-11-14 一节。
 
 ---
 

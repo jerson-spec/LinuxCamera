@@ -1,6 +1,6 @@
 # 架构说明
 
-> 当前状态：**W3 完成**（连续预览 + 双缓冲 + 定点转换 + 按行写 + letterbox）。
+> 当前状态：**v1.0**（连续预览 + 双缓冲 + 定点转换 + 按行写 + letterbox + 触摸 + OSD + 拍照 + 8h 长跑）。
 >
 > 本文描述当前真实代码结构，不描述理想中的最终架构。
 > 新会话请先读 `docs/handoff.md`，再读本文。
@@ -21,11 +21,15 @@ V4L2 采集 → YUYV 转换 → LCD 显示 → 拍照/存卡 → 网络推流
 
 ```text
 摄像头 YUYV → yuyv_to_rgb()（定点）→ 按行写 framebuffer → 双缓冲 flip
-每秒统计 fps/耗时/丢帧/内存；支持 800×600@15 / 640×480@30 和 letterbox 居中
+              ↑ 触摸事件（左拍照 / 右切分辨率）
+              ↑ OSD（分辨率 / 帧率 / 丢帧）
+
+拍照：camera_stop → S_FMT(MJPG) → start → 取一帧 → 写 .jpg → 切回 YUYV
+分辨率：800×600 / 640×480 / 352×288 轮换，letterbox 居中
 ```
 
 ```text
-连续预览 + 双缓冲 + FPS
+v1.0：预览 + 触摸 + 拍照 + 切分辨率 + OSD + 8 小时稳定
 ```
 
 ---
@@ -289,7 +293,47 @@ void Get_lcd_parameters(struct fb_fix_screeninfo *fix,
 - 错误路径清理不完整；
 - 逐像素函数调用，性能不适合高帧率（480k 次/帧，约 30 ms）。
 
-### 5.5 `tests/manual`
+### 5.5 `camera`
+
+`include/camera.h` / `src/camera.c`。纯 V4L2，模块里没有全局状态，`camera_t` 由调用者持有。
+
+API：
+
+```c
+int  camera_open(camera_t *cam, const char *dev);
+int  camera_set_format(camera_t *cam, unsigned int w, unsigned int h, unsigned int pixfmt);
+int  camera_set_fps(camera_t *cam, unsigned int num, unsigned int den);
+int  camera_set_fps_if_needed(camera_t *cam, unsigned int num, unsigned int den);
+int  camera_start(camera_t *cam, unsigned int nbufs);
+int  camera_dequeue(camera_t *cam, struct v4l2_buffer *buf);
+int  camera_queue(camera_t *cam, struct v4l2_buffer *buf);
+int  camera_stop(camera_t *cam);
+void camera_close(camera_t *cam);
+```
+
+- `camera_set_format()` 在 streaming 时拒绝，必须先 `camera_stop()`；
+- `camera_stop()` = `STREAMOFF → munmap → REQBUFS(0)`，可重复调用；
+- `camera_start()` 失败会自己回滚；
+- `camera_set_fps_if_needed()` 先 `G_PARM`，帧率已经对就不调 `S_PARM`（这颗 UVC 调一次要 2 秒）。
+
+### 5.6 `osd`
+
+`include/osd.h` / `src/osd.c`。8×16 点阵，`fontdata_8x16` 在 `include/font.h`。
+
+- 直接调用 `lcd_put_pixel()`，不另开写显存的路；
+- 支持换行、右对齐、1 像素阴影、填充矩形；
+- 必须画在 `lcd_flip()` 之前，否则翻页后看不到。
+
+### 5.7 `touch`
+
+`include/touch.h` / `src/touch.c`。evdev 单点触摸。
+
+- `O_NONBLOCK` 打开，由主循环 `poll()` 驱动；
+- 先试 `ABS_X/ABS_Y`，不支持时退回 `ABS_MT_POSITION_X/Y`；
+- `touch_read()` 返回 `-1 错误 / 0 无点击 / 1 点击`；
+- 这颗屏驱动报 800×480、实际发 1024×600，`main` 里用 `touch_set_range()` 覆盖。
+
+### 5.8 `tests/manual`
 
 | 程序 | 作用 |
 |---|---|
@@ -298,19 +342,19 @@ void Get_lcd_parameters(struct fb_fix_screeninfo *fix,
 | `test_Trans_YUYV.c` | 合成 YUYV 色条 → RGB → LCD |
 | `test_camera_preview.c` | 连续预览 + 双缓冲 + 统计（v0.5 / W3） |
 
-### 5.6 构建目标
+### 5.9 构建目标
 
 ```text
-camera_core          # config.c + log.c + lcd.c + yuyv.c
+camera_core          # config.c + log.c + lcd.c + yuyv.c + camera.c + osd.c + touch.c
 camera               # src/main.c，配置检查占位
 test_Get_images      # 采集测试
 test_Draw_region     # LCD 区域测试
 test_Trans_YUYV      # YUYV 色条演示
-test_camera_preview  # 连续预览（v0.5，W3 优化）
+test_camera_preview  # v1.0 主程序：预览/触摸/拍照/切分辨率/OSD
 config_test          # 配置测试
 ```
 
-`camera_core` 目前包含 Linux 专用的 `lcd.c`，所以整体是 Linux-only。
+`camera_core` 目前包含 Linux 专用的 `lcd.c` / `camera.c` / `touch.c`，所以整体是 Linux-only。
 
 ---
 
@@ -332,42 +376,39 @@ config_test          # 配置测试
 
 按优先级：
 
-1. `yuyv_to_rgb()`  没有 stride 参数；
-2. `yuyv.c` 全局 `full` 状态；
-3. `lcd.c` 全局状态；`lcd_init()` 重置日志、`lcd_deinit()` 关闭日志；
-4. `test_camera_preview.c` 550+ 行，承担主程序职责；
-5. `app_config_t` 过大；
+1. `test_camera_preview.c` 700 行，采集/显示/触摸/OSD/拍照/切分辨率都在里面；
+2. `yuyv_to_rgb()` 没有 stride 参数；
+3. `yuyv.c` 全局 `full` 状态；
+4. `lcd.c` 全局状态；`lcd_init()` 重置日志、`lcd_deinit()` 关闭日志；
+5. `app_config_t` 过大，touch/OSD 还没有配置项；
 6. 配置路径分散，`lcd_init()` 会重复 load `lcd.ini`；
-7. 首帧延迟 1–1.6 s；
+7. 首帧延迟 1–1.6 s；切到 800×600 固定 1.7 s；
 8. 没有单元测试/CI；
 
 ---
 
 ## 8. 下一步架构演进
 
-### W3 已完成（2026-11-09）
+### v1.0 已完成（2026-11-14）
 
-```text
-优化前：conv 35.1 + draw 30.6 = 65.7 ms / 66.7 ms（CPU 98%）
-优化后：conv 14.0 + draw  8.6 = 22.6 ms / 66.7 ms（CPU 34%）
+- camera / osd / touch 已经拆成独立模块；
+- 8 小时长跑：610390 帧、0 错误、RSS/fd 不增长。
 
-结果：640×480@30 跑通；letterbox 居中
-```
+### 下一步：v1.5 网络
 
-### 下一步：v1.0 拍照
+- 先做 `/snapshot.jpg`：复用 `snapshot_mjpeg()` 的切格式逻辑，把图通过 HTTP 返回；
+- 再做 `/stream`：`multipart/x-mixed-replace` 推 MJPEG；
+- `/stream` 期间摄像头是 MJPG，本地预览会停——可以接受，或者做“推流时不显示”；
+- 单客户端跑通后再想多客户端和延迟。
 
-- 先把 `test_camera_preview.c` 里的拍照逻辑单独拆成函数（触发源先用信号，
-  后面换触摸）；
-- 用 libjpeg 或摄像头 MJPEG 存盘，文件写到 `images/`；
-- 拍照时不要改预览主循环的结构，触发只置标志。
+### v2.0 前要做的重构
 
-### v1.0 前要做的小重构
-
-- 把 V4L2 采集抽到 `src/camera.c`；
-- 把显示循环抽到 `src/display.c`；
-- `src/main.c` 只负责编排；
+- `test_camera_preview.c` 已经 700 行，把主循环拆到 `src/app.c`；
+- 显示部分抽到 `src/display.c`；
+- `src/main.c` 只负责参数解析和编排；
 - 日志只在 main 初始化一次，`lcd.c` 不再碰日志；
-- 再考虑拆 `app_config_t`。
+- 再拆 `app_config_t`，给 touch/OSD 加配置项；
+- 补单元测试（yuyv 转换、config 解析可以脱离硬件测）。
 
 ---
 

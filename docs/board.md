@@ -3,7 +3,7 @@
 > 本文记录当前开发板、设备节点、工具链、构建、部署和调试方式。
 > 如果换了板子、SDK 或摄像头，先更新本文。
 >
-> 当前阶段：W3 完成（预览优化 + 多分辨率 + letterbox）。
+> 当前阶段：v1.0（8 小时长跑通过）。
 
 ---
 
@@ -242,7 +242,7 @@ adb push build-arm-dbg/test_camera_preview /root/LinuxCamera/test_camera_preview
 ./test_Trans_YUYV
 ```
 
-### 6.5 摄像头连续预览
+### 6.5 摄像头预览 + 触摸（v1.0）
 
 ```bash
 ./test_camera_preview
@@ -250,35 +250,40 @@ adb push build-arm-dbg/test_camera_preview /root/LinuxCamera/test_camera_preview
 
 默认 `camera.ini` 请求 1024×600，摄像头实际给 800×600，画面居中：
 
-- 左右各 112 像素黑边，上下贴边；
+- 左上角 OSD：`res: 800*600`、`fps: ...`、`drop: ...`、`tap left: shot / tap right: res`；
+- 点屏幕**左半边**：拍一张 jpg 到 `images/`；
+- 点**右半边**：在 800×600 / 640×480 / 352×288 之间轮换；
 - 每秒打印一行：
   `fps: 15.0, wait: 43.9, conv: 14.0, draw: 8.6, dropped: 0, rss: 6064 kB`；
 - 按 Ctrl-C 干净退出，收尾打印 `DQbuf = Qbuf = Frames`。
 
-想看 30fps，把 `config/camera.ini` 改成 `width=640 / height=480` 再跑。
-程序会用 `VIDIOC_S_PARM` 请求 30fps；摄像头支持就给 30，不支持会自己降。
-暗光下自动曝光也会把帧率降到 25/20/15——判断依据是 `wait` 变大而 `dropped` 不变。
-这时用 `v4l2-ctl -d /dev/video1 --get-parm` 能看到当前帧率已经变了。
-
-### 6.6 10 分钟稳定性测试
+不接屏幕也能测：
 
 ```bash
-# 终端 A
-./test_camera_preview
-
-# 终端 B：每 60 秒记一次内存
-while true; do
-    grep VmRSS /proc/$(pidof test_camera_preview)/status
-    sleep 60
-done
+kill -USR1 <pid>   # 拍照
+kill -USR2 <pid>   # 切分辨率
 ```
 
-通过标准（2026-11-08 实测）：
+触摸坐标不对时，先 `evtest /dev/input/event1` 摸四角，再把实测范围填到
+`test_camera_preview.c` 的 `touch_set_range()`（这颗屏驱动报 800×480，实际是 1024×600）。
 
-- 604 s / 9036 帧 / 平均 14.96 fps；
-- `dropped` 不随时间增长（本轮为 0）；
-- `VmRSS` 6324 kB 恒定；
-- 退出时 `DQbuf == Qbuf == Frames`。
+### 6.6 长跑测试
+
+```bash
+nohup ./test_camera_preview >/dev/null 2>&1 &
+nohup ./soak_test.sh 8 >/dev/null 2>&1 &     # 8 小时；传 1 就是 1 小时
+```
+
+脚本每 10 分钟拍一张、每 30 分钟切一次分辨率、每 60 秒记录
+RSS/fd/温度/剩余空间/图片数，日志在 `soak/` 下。
+
+8 小时实测（2026-11-14）：
+
+- 610390 帧、47 张照片、15 次切换；
+- `errors=0 warnings=0 poll_timeouts=0`；
+- `VmRSS` 在 1472–6548 kB 之间摆，`VmHWM 7104 kB`，无上升趋势；
+- `fd=7` 全程不变；温度 68.1–70.6 ℃；
+- 收尾 `DQbuf = Qbuf = Frames = 610390`。
 
 ---
 
@@ -361,8 +366,10 @@ p lcd_var_screeninfo_t
 - 板子没有 IP，gdb 走 ADB；
 - 摄像头 800×600@15fps / 640×480@30fps，LCD 1024×600，letterbox 居中；
 - 暗光下自动曝光会主动降帧，不是丢帧；
+- 触摸驱动报的范围是 800×480，实际是 1024×600，代码里已覆盖；
 - `lcd_write_line_rgb888()` 只支持 32bpp；
-- 没有触摸/OSD/网络；拍照还没做；
-- 首帧延迟 1–1.6 s（摄像头启动 + 曝光收敛）；
+- 没有缩放、没有网络；
+- 切到 800×600 固定 1.7 s，首帧延迟 1–1.6 s；
+- 温度长跑稳定在 68–71℃。
 
   

@@ -4,6 +4,7 @@ stage/
 # 运行产物
 *.log
 images/
+soak/
 *.yuyv
 *.yuv
 *.raw
