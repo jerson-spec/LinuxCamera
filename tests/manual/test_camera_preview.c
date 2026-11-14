@@ -24,6 +24,7 @@
 #include "log.h"
 #include "camera.h"
 #include "osd.h"
+#include "touch.h"
 
 static volatile sig_atomic_t g_stop = 0;
 static volatile sig_atomic_t g_save = 0;
@@ -305,10 +306,10 @@ int main(int argc, char **argv)
 	int i;
 	int exit_code = 0;
 	int lcd_ok = 0;
+	int tch_ok = 0;
 	int poll_timeout_cnt = 0;
 
 	struct fb_var_screeninfo lcd_var_screeninfo;
-	struct pollfd fds[1];
 	struct sigaction sa;
 	struct timespec ts;
 	struct tm tm;
@@ -420,7 +421,24 @@ int main(int argc, char **argv)
 		goto cleanup;
 	}
 
-	/* 5. 信号 */
+	/* 5. 触摸屏 */
+	touch_t tch;
+	
+	/** 触摸屏设备系event1，事先在板子上手动确认 **/
+	if(touch_open(&tch, "/dev/input/event1") < 0){
+		LOG_WARN("touch open failed");
+	}
+	else{
+		tch_ok = 1;
+		/*
+		 * 驱动通过 EVIOCGABS 报的是 800x480，但它实际发的是 1024x600 的屏幕坐标
+		 * （log 里出现过 x=1267，说明原始值早就超过 800）。
+		 * 用 evtest 摸四角确认实际范围后，在这里覆盖掉。
+		 */
+		touch_set_range(&tch, 0, 1023, 0, 599);
+	}
+	
+	/* 6. 信号 */
 	memset(&sa, 0, sizeof(sa));
 	sa.sa_handler = on_sigusr1;
 	sigemptyset(&sa.sa_mask);
@@ -443,7 +461,7 @@ int main(int argc, char **argv)
 		goto cleanup;
 	}
 
-	/* 6. RGB 缓冲 */
+	/* 7. RGB 缓冲 */
 	size = (size_t)cam.width * (size_t)cam.height * 3;
 	rgbbuf = malloc(size);
 	if (rgbbuf == NULL) {
@@ -454,14 +472,17 @@ int main(int argc, char **argv)
 	}
 	memset(rgbbuf, 0, size);
 
-	/* 7. 起流 */
+	/* 8. 起流 */
 	if (camera_start(&cam, camera_cfg.buffers) < 0) {
 		exit_code = -1;
 		goto cleanup;
 	}
-
-	fds[0].fd = cam.fd;
-	fds[0].events = POLLIN;
+	
+	struct pollfd fds[2];
+	fds[0].fd = cam.fd; 	 fds[0].events = POLLIN;
+	if(tch_ok){
+		fds[1].fd = tch.fd; 	 fds[1].events = POLLIN;
+	}
 
 	last_t0 = get_time_ms();
 	int timeout_ms = (frames == 0)? 5000 : 2000; 
@@ -469,7 +490,7 @@ int main(int argc, char **argv)
 		fds[0].revents = 0;
 		t0 = get_time_ms();
 
-		ret = poll(fds, 1, timeout_ms);
+		ret = poll(fds, tch_ok ? 2 : 1, timeout_ms);
 		if (ret == 0) {
 			LOG_WARN("poll timeout");
 			poll_timeout_cnt++;
@@ -486,7 +507,23 @@ int main(int argc, char **argv)
 			exit_code = -2;
 			break;
 		}
+		
+		/* 读触摸屏事件 */
+		if (tch_ok && (fds[1].revents & POLLIN)) {
+			int tx, ty;
+			int r = touch_read(&tch, &tx, &ty);
+			if (r < 0) {
+				LOG_WARN("touch read error");
+			} else if (r == 1) {
+				LOG_INFO("tap: %d,%d", tx, ty);
+				if (tx > (int)lcd_var_screeninfo.xres / 2)
+					g_res = 1;
+				else
+					g_save = 1;
+			}
+		}		
 
+		/* 检查帧 */
 		if (!(fds[0].revents & POLLIN)) {
 			if (fds[0].revents & POLLERR || fds[0].revents & POLLHUP) {
 				LOG_ERROR("poll exit");
@@ -496,7 +533,7 @@ int main(int argc, char **argv)
 			LOG_WARN("poll revents mismatch: %hd", fds[0].revents);
 			continue;
 		}
-
+		
 		{
 			struct v4l2_buffer buf;
 
@@ -571,7 +608,7 @@ int main(int argc, char **argv)
 			last_t0 = t3;
 			wait_time = conv_time = draw_time = n = 0;
 		}
-
+		
 		/* 拍照：触发源只是置标志，真正处理在循环里 */
 		if (g_save) {
 			int r;
@@ -602,11 +639,15 @@ int main(int argc, char **argv)
 			
 			g_save = 0;
 		}
+		
+		/* 切换分辨率 */
 		if(g_res){
 			int r;
-			res_switch_t res_sw = {640,480};
+			static int sw_index = 2;
+			if(sw_index > 3) sw_index = 1;
+			res_switch_t res_sw[3] = {{800,600},{640,480},{352,288}};
 			double t_switch_s = get_time_ms();
-			r = res_switch(&cam, &camera_cfg, &res_sw, &rgbbuf,&lb);
+			r = res_switch(&cam, &camera_cfg, &res_sw[sw_index - 1], &rgbbuf,&lb);
 
 			have_sequence = 0;
 		    poll_timeout_cnt = 0;
@@ -616,9 +657,11 @@ int main(int argc, char **argv)
 		        g_res = 0;
 		        break;
 		    }
-			if(r == 0)
+			if(r == 0){
 				LOG_INFO("res switch to %u*%u ( %.0f ms)",
-		                 res_sw.width, res_sw.height, get_time_ms() - t_switch_s);
+		                 res_sw[sw_index -1].width, res_sw[sw_index - 1].height, get_time_ms() - t_switch_s);
+				sw_index++;
+			}
 			 else
 		        LOG_WARN("res switch failed, preview restored");
 			 
@@ -637,6 +680,10 @@ int main(int argc, char **argv)
 
 		snprintf(line, sizeof(line), "fps: %.1f  drop: %u", fps, dropped);
 		osd_show_text_shadow(lb.x_offset + 8, lb.y_offset + 8 + 18,
+		                     (const unsigned char *)line, 0x00FFFFFF, 0x00000000);		
+
+		snprintf(line, sizeof(line), "tap left: shot / tap right: res");
+		osd_show_text_shadow(lb.x_offset + 8, lb.y_offset + 8 + 36,
 		                     (const unsigned char *)line, 0x00FFFFFF, 0x00000000);		
 		#else	//无阴影
 		unsigned char osd_text[64];
@@ -663,6 +710,8 @@ cleanup:
 	free(rgbbuf);
 	if (lcd_ok)
 		lcd_deinit();
+	if(tch_ok)
+		touch_close(&tch);
 
 	return (exit_code != 0) ? -1 : 0;
 }

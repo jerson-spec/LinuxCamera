@@ -53,11 +53,11 @@ fi
 
 # ============================================================
 # 4. 向 /dev/tty0 写入控制序列
-#    原命令: echo -e "\033[9;15]" > /dev/tty0
+#    原命令: echo -e "\033[9;0]" > /dev/tty0
 # ============================================================
 if [ -c /dev/tty0 ] && [ -w /dev/tty0 ]; then
     # 用 printf 更可靠，避免不同 shell 对 echo -e 支持差异
-    printf '\033[9;15]' > /dev/tty0 2>/dev/null \
+    printf '\033[9;0]' > /dev/tty0 2>/dev/null \
         && log_info "已向 /dev/tty0 输出控制序列" \
         || log_warn "写入 /dev/tty0 失败"
 else

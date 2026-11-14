@@ -397,3 +397,44 @@ yuyv: hoist chroma terms per pixel pair, inline clamp, drop memcpy (conv 25.9 ->
    OSD: real-time display of resolution and frame rate
   ```
 
+
+
+# [ touch: evdev tap input and 3-way resolution cycling ]——26_11_14
+
+- 触摸屏这部分的代码就比以上各项都难写很多，遇到很多错误层层递进，一是我读取触碰屏数据时直接用ioctl(tch_p->fd, EVIOCGABS(ABS_X), &absI);而EVIOCGABS 只是**查询该 ABS 轴“最后一次上报的值”**，他**不消费 `/dev/input/eventX` 的事件队列**、**拿不到“按下/抬起”状态**，是错误的，编译通过上板倒是能执行，但是触摸屏幕没反应，这是可以预见的；
+
+- 后面把 `EVIOCGABS` 取快照改成 `read()` 消费事件，**保留** `EVIOCGABS(ABS_X/ABS_Y)` 的 `ioctl`——但它现在**只用来取 min/max**（这两个值几乎不变，拿一次就行，于是放到touch_open里去做），while(1)循环里消费 /dev/input/eventX，读到一帧 SYN_REPORT 为止，但是这样还是有问题，读取事件方式是对了，但链路有问题，问题在于：1.tch_p->fd = open(dev, O_RDONLY);里读取方式是阻塞模式，`read()` 在没有触摸事件时会**一直阻塞**。也就是说：每秒打完 fps 那行日志后，主循环就卡在 `read()` 里，碰一下屏幕才会继续，一直触摸屏幕呢，打印信息也还是只显示0，这就牵扯到问题 2.else if (ev.type == EV_SYN && ev.code == SYN_REPORT)   break;   /* 一帧结束，坐标已就绪 */——`SYN_REPORT` 不只属于坐标事件——按键、MSC 等其他事件也会以 `SYN_REPORT` 结尾。如果设备先报了一个 `EV_KEY`（比如 `BTN_TOUCH`），紧跟一个 `SYN_REPORT`，而 `ABS_X/ABS_Y` 还没来，循环就 `break` 了，此时 `x_val`、`y_val` 还是初始的 0，于是值一直打印0，也就是现在的逻辑是“收到一个 SYN 就返回成功”。按下、抬起、移动分不清，所以：没有触摸时也可能返回（其他事件带的 SYN）；按下之后坐标没更新就直接返回 0; 于是对应修改：打开文件时用非阻塞方式；`touch_read`用 `while` 排空，`EAGAIN` 时退出循环而不是报错；只有 `BTN_TOUCH` **抬起**并且收到过坐标，才算一次点击——避免“移动”被当成点击；
+
+- 而这样上机实验后，点击屏幕左边确实能拍照了，但点击屏幕右边却未能实现切换分辨率而是仍然拍照，原因在于坐标位置一直显示的（0,0），这样不管触摸哪个位置，最后计算出来触点都在左半屏，于是都走拍照的分支 ； 我们在touch_open函数里添加的打印信息：LOG_INFO("touch: %s x[%d,%d] y[%d,%d]", dev, tch_p->x_min, tch_p->x_max, tch_p->y_min, tch_p->y_max);最终打印出来`x[0,0]`，后面分析原因，关键在于：这颗触摸屏（event1）是**多点触摸设备**，只报 `ABS_MT_POSITION_X/Y`，不报 `ABS_X/ABS_Y`。而有的驱动对“不支持的轴”**不返回错误**，而是把 `minimum/maximum` 都填 0——于是 `x_min = x_max = 0`，`touch_open` 表现为“成功”；解决方法是后面新增ioctl(fd, EVIOCGABS(**`ABS_MT_POSITION_X`**), &absI)获取多点触摸屏ABS信息，拿到数后判断出max <= min就返回失败，即针对多点触摸设备做兼容；这样修改完上机实验，终于第一次能实现“点左边拍照、点右边切换分辨率“；
+
+- 但是读出来的数还是有问题，点击屏幕右边比较靠右的位置，x的值居然达到了1200多，超出了屏幕的分辨率1024，这显然是不对的，后面检查映射关系并没有问题，原因就在于touch_open里一开始打印的信息：x[0,800] y[0,480]，x最大范围到800，y最大范围到480，计算一下，如果打印出来屏幕触点位置在1200多，那按现在的映射关系原始 x触点位置就在大约900多的位置，这超出了一开始打印的这个范围的阈值，说明问题出在这，读取到的x与y最大范围存在错误，后面查找原因：`EVIOCGABS(ABS_X)` 返回的范围来自驱动的配置，通常是设备树里的：touchscreen-size-x = <800>; touchscreen-size-y = <480>;100ask 这块板子最早的 7 寸屏是 800×480，后来换成 1024×600 的屏，**设备树没跟着改**，所以：驱动“声明”的范围：800×480；而触摸控制器实际输出的范围：1024×600（控制器的固件或驱动内部按屏幕分辨率算了），两边对不上，映射数据出错，造成了这种错误；找出这个问题，解决方法就很简单了，在touch_open函数中ioctl EVIOCGABS(axis)读取到最小最大值后不相信他给出的值，我们自己设置，evtest /dev/input/event1，之后用手指依次点屏幕的**左上、右上、左下、右下**，记下 `ABS_MT_POSITION_X/Y` 的数值，不出所料点右下角的位置值应该接近于屏幕的分辨率，我们再设置最小值最大值为我们测出来的这个实测最小最大值即可，另外为了以防万一，还在touch_read根据映射关系算出屏幕触点位置后对他做一个与分辨率的判断，超出的范围我们直接截断；这样上机实验后，实验结果终于完全正常；
+
+- 还有一个问题：
+  ```
+  ret = poll(fds, 1, timeout_ms);        // 第 491 行：只等摄像头
+  if (ret == 0) { ... continue; }
+  ...
+  if (!(fds[0].revents & POLLIN)) { ... continue; }
+  
+  /* 读触摸屏事件 */
+  ret = poll(fds, tch_ok ? 2 : 1, 2000); // 第 520 行：又等一次
+  if (tch_ok && (fds[1].revents & POLLIN)) { ... }
+  
+  /* 然后直接 camera_dequeue，不看第二次 poll 的结果 */
+  ```
+
+  每帧等两次，虽然第一次已经拿到了帧、第二次通常立刻返回，但是流程不规范；并且第二次 `poll` 的返回值没处理；只来了触摸事件、没有帧的时候，第二次 poll 返回 1，然后去 dequeue，同样可能阻塞；正确的做法是**一次 poll 等两个 fd，然后分派**，ret = poll(fds, tch_ok ? 2 : 1, timeout_ms);，poll到数据之后先处理触摸，再看有没有帧，只有触摸、没有帧就回去重新 poll；另外`fds[1].fd` / `fds[1].events` 加一个条件判断，只在 `tch_ok` 为真时才赋值，这样流程上更安全；
+  
+- 分辨率轮转切换就比较好做了，用一个变量表示标签即可；最后可以实现分辨率在{{800,600},{640,480},{352,288}}三组来回切换，需要注意的是static int sw_index = 2;一开始把标签设置为第2个，设置为第一个的话第一次切换相当于从800x600切换到 800x600，没做任何变化，表现为点击屏幕第一次没反应；另外可以明显发现最后从第三个分辨率切换到第一个的时候延时比较高，大约有一到两秒；
+
+  code -> git : 
+
+  ```
+  touch: evdev tap input and 3-way resolution cycling
+  ```
+  
+  ```
+  tag: touch-input-milestone
+  ```
+  
+  
