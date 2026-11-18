@@ -26,6 +26,7 @@ add_library(camera_core STATIC
     src/camera.c
     src/osd.c
     src/touch.c
+    src/http.c
 )
 target_include_directories(camera_core PUBLIC
     include

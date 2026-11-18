@@ -25,6 +25,8 @@
 #include "camera.h"
 #include "osd.h"
 #include "touch.h"
+#include "http.h"
+#include "snapshot.h"
 
 static volatile sig_atomic_t g_stop = 0;
 static volatile sig_atomic_t g_save = 0;
@@ -223,16 +225,21 @@ restore_fail:
 
 /*
  * 返回值：
- *   0  拍照成功，预览已恢复
- *   1  拍照失败，但预览已恢复（可以继续跑）
- *  -1  预览恢复失败（必须退出）
+ *	 0	拍照成功，预览已恢复
+ *	 1	拍照失败，但预览已恢复（可以继续跑）
+ *	-1	预览恢复失败（必须退出）
  */
-static int snapshot_mjpeg(camera_t *cam,const app_config_t *cfg,const char *path,size_t *out_len)
+int camera_grab_jpeg(camera_t *cam,const app_config_t *cfg,
+		unsigned char **outdata,size_t *out_len)
 {
 	struct v4l2_buffer buf;
 	struct pollfd pfd;
 	size_t n;
+	unsigned char *data = NULL;
 	int ret = 1;
+
+	*outdata = NULL;
+	*out_len = 0;
 	
 	/* camera_stop */
 	camera_stop(cam);
@@ -265,12 +272,17 @@ static int snapshot_mjpeg(camera_t *cam,const app_config_t *cfg,const char *path
 		goto stop;
 	}
 
-	/* 处理 */
-	if(snapshot_save(path, cam->mem[buf.index], n )< 0){
-		camera_queue(cam,&buf);
+	data = malloc(n);
+	if (data == NULL) {
+		LOG_ERROR("snapshot: malloc %lu: %s", (unsigned long)n, strerror(errno));
+		camera_queue(cam, &buf);
 		goto stop;
 	}
-	camera_queue(cam,&buf);
+
+	memcpy(data, cam->mem[buf.index], n);
+	camera_queue(cam, &buf);
+
+	*outdata = data;
 	*out_len = n;
 	ret = 0;
 	
@@ -296,6 +308,28 @@ restore_fail:
 	return ret;
 }
 
+/*
+ * 返回值：
+ *	 0	拍照成功，预览已恢复
+ *	 1	拍照失败，但预览已恢复（可以继续跑）
+ *	-1	预览恢复失败（必须退出）
+ */
+static int snapshot_mjpeg(camera_t *cam,const app_config_t *cfg,const char *path,size_t *out_len)
+{
+	unsigned char *buf = NULL;
+	size_t len = 0;
+	int ret = camera_grab_jpeg(cam, cfg, &buf, &len);
+
+	if (ret == 0) {
+		if (snapshot_save(path, buf, len) < 0)
+			ret = 1;
+		else
+			*out_len = len;
+	}
+
+	free(buf);
+	return ret;
+}
 
 /*
  *	./test_camera_preview [path/camera.ini] [path/lcd.ini]
@@ -307,6 +341,8 @@ int main(int argc, char **argv)
 	int exit_code = 0;
 	int lcd_ok = 0;
 	int tch_ok = 0;
+	int http_ok = 0;
+	int http_fd = -1;
 	int poll_timeout_cnt = 0;
 
 	struct fb_var_screeninfo lcd_var_screeninfo;
@@ -334,7 +370,7 @@ int main(int argc, char **argv)
 	
 	char tbuf[32];
 	char filename[512];
-	const char *ext = "jpg";	/* 目前写的是 RGB888 裸数据，等 MJPEG 拍照接入后改成 jpg */
+	const char *ext = "jpg";	
 
 	memset(&cam, 0, sizeof(cam));
 	cam.fd = -1;
@@ -438,7 +474,15 @@ int main(int argc, char **argv)
 		touch_set_range(&tch, 0, 1023, 0, 599);
 	}
 	
-	/* 6. 信号 */
+	/* 6. HTTP 服务 */
+	http_fd = http_init();
+	if (http_fd < 0) {
+		LOG_WARN("http init failed, continue without http");
+	} else {
+		http_ok = 1;
+	}
+	
+	/* 7. 信号 */
 	memset(&sa, 0, sizeof(sa));
 	sa.sa_handler = on_sigusr1;
 	sigemptyset(&sa.sa_mask);
@@ -461,7 +505,7 @@ int main(int argc, char **argv)
 		goto cleanup;
 	}
 
-	/* 7. RGB 缓冲 */
+	/* 8. RGB 缓冲 */
 	size = (size_t)cam.width * (size_t)cam.height * 3;
 	rgbbuf = malloc(size);
 	if (rgbbuf == NULL) {
@@ -472,16 +516,29 @@ int main(int argc, char **argv)
 	}
 	memset(rgbbuf, 0, size);
 
-	/* 8. 起流 */
+	/* 9. 起流 */
 	if (camera_start(&cam, camera_cfg.buffers) < 0) {
 		exit_code = -1;
 		goto cleanup;
 	}
 	
-	struct pollfd fds[2];
-	fds[0].fd = cam.fd; 	 fds[0].events = POLLIN;
-	if(tch_ok){
-		fds[1].fd = tch.fd; 	 fds[1].events = POLLIN;
+	/*
+	 * poll 三个来源：摄像头、触摸、HTTP 监听。
+	 * 触摸/HTTP 是可选的，所以用 idx 记录它们在数组里的位置。
+	 */
+	struct pollfd fds[3];
+	int nfds = 0;
+	int touch_idx = -1;
+	int http_idx = -1;
+
+	fds[nfds].fd = cam.fd;      fds[nfds].events = POLLIN;  nfds++;
+	if (tch_ok) {
+		touch_idx = nfds;
+		fds[nfds].fd = tch.fd;  fds[nfds].events = POLLIN;  nfds++;
+	}
+	if (http_ok) {
+		http_idx = nfds;
+		fds[nfds].fd = http_fd; fds[nfds].events = POLLIN;  nfds++;
 	}
 
 	last_t0 = get_time_ms();
@@ -490,7 +547,7 @@ int main(int argc, char **argv)
 		fds[0].revents = 0;
 		t0 = get_time_ms();
 
-		ret = poll(fds, tch_ok ? 2 : 1, timeout_ms);
+		ret = poll(fds, nfds, timeout_ms);
 		if (ret == 0) {
 			LOG_WARN("poll timeout");
 			poll_timeout_cnt++;
@@ -509,7 +566,7 @@ int main(int argc, char **argv)
 		}
 		
 		/* 读触摸屏事件 */
-		if (tch_ok && (fds[1].revents & POLLIN)) {
+		if (touch_idx >= 0 && (fds[touch_idx].revents & POLLIN)) {
 			int tx, ty;
 			int r = touch_read(&tch, &tx, &ty);
 			if (r < 0) {
@@ -522,6 +579,21 @@ int main(int argc, char **argv)
 					g_save = 1;
 			}
 		}		
+
+		/*
+		 * HTTP 请求：http_accept 返回连接 fd，serve 里收请求、拍照、
+		 * 回响应并把 fd 关掉。拍照会 stop/start 流，所以 sequence 要重置。
+		 */
+		if (http_idx >= 0 && (fds[http_idx].revents & POLLIN)) {
+			int cfd = http_accept(http_fd);
+
+			if (cfd >= 0)
+				http_serve_snapshot(cfd, &cam, &camera_cfg);
+
+			have_sequence = 0;
+			poll_timeout_cnt = 0;
+			continue;
+		}
 
 		/* 检查帧 */
 		if (!(fds[0].revents & POLLIN)) {
@@ -707,6 +779,8 @@ cleanup:
 
 	if (cam.fd >= 0)
 		camera_close(&cam);
+	if (http_ok)
+		http_close(http_fd);
 	free(rgbbuf);
 	if (lcd_ok)
 		lcd_deinit();

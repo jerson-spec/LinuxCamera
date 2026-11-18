@@ -437,4 +437,118 @@ yuyv: hoist chroma terms per pixel pair, inline clamp, drop memcpy (conv 25.9 ->
   tag: touch-input-milestone
   ```
   
+
+
+
+# [ http: serve a single JPEG over HTTP (/snapshot.jpg) ]——26_11_18
+
+- 这一块之前学习Linux应用编程基础知识的时候写过TCP的server、client的demo，那时候是收发字符串，而且都是在虚拟机框架下做的实验，用的两个客户端ip一个是vm的eth0，一个是virbr0，[eth0，lo，virbr0分别是什么-云社区-华为云](https://bbs.huaweicloud.com/blogs/317971)，本质是一个跑通的demo，所以不能直接使用，于是去补了http的相关知识，[HTTP 教程 | 菜鸟教程](https://www.runoob.com/http/http-tutorial.html)，掌握NAT和桥接两种网络配置方式之后再买网线配网络环境（[vmware与主机、开发板建立网络连接_虚拟机nat模式上网,怎样连接开发板-CSDN博客](https://blog.csdn.net/weixin_46435653/article/details/119285534)）：
+
+  - **桥接**：把 **VM 的虚拟网卡**直接连接到**主机上的某块物理网卡**。经过桥接，VM 就在那块物理网卡所在的二层网络里；由于 USB 网卡用网线连着板子，VM 也就和板子处在同一个网段。 文章说“桥接用于连开发板”没错，但更准确的说法是：**桥接是在 VM 和主机物理网卡之间**，只是这块物理网卡正好连着板子。
+  - **NAT**：VM 通过主机访问外网。VM 在 VMnet8 网段，由 VMware 做地址转换，走主机的默认路由。
+
+  、掌握服务器、客户端的收发关系：
+
+   ```text
+      main()
+       └─ poll(fds, ...)                       ← 监听 fd 有动静 = 有人连进来
+           └─ accept(listen_fd) → cfd          ← 得到和这个浏览器的连接 fd
+               └─ http_serve_snapshot(cfd, &cam, &camera_cfg)
+                   ├─ recv(cfd, req, ...)       ← 读浏览器发来的请求
+                   ├─ sscanf(req, "%s %s", ...) ← 解析出 GET 和 /snapshot.jpg
+                   ├─ camera_grab_jpeg(...)     ← 拍一帧，得到 jpeg / jpeg_len
+                   ├─ snprintf(hdr, ...)        ← 拼响应头
+                   ├─ send_all(cfd, hdr, hlen)  ← 发头（字符串）
+                   ├─ send_all(cfd, jpeg, jpeg_len) ← 发图（二进制）
+                   └─ close(cfd)                ← 挂电话
+   ```
   
+    之后以这样的框架写代码，该抽离的抽离（server那一段若干个流程，抽成init、accept、recv、send（这里一开始我没搞清楚服务器和客户端的概念，以为服务器只能收、客户端只能发，这是当时学习时demo留下的印象，实则不然，服务器当然能发，不然为什么叫服务器，客户端自然也当然能收）（另外注意我们这不需要写客户端的程序，我们当前的电脑浏览器，之后网线能连路由器（板子网线接路由器 LAN，手机连同一 Wi-Fi，板子用 DHCP 或静态同网段地址）或能做共享网络（Windows 上开“Internet 连接共享”把 USB 网卡共享给 Wi-Fi（比较折腾））时我们的同一网段下的手机浏览器本身就是客户端，内部做好了实现，因此不需要我们来写代码））、（test_camera_preview文件里拍照函数抽成”取一帧到内存“ + ”把内存写到文件“）
+  
+  （	这样之后：
+  
+  - 拍照按钮：`camera_grab_jpeg()` → `snapshot_save()` → `free()`；
+  
+  - HTTP：`camera_grab_jpeg()` → `send()` → `free()`。
+  
+    结构清晰，另外注意grab是**要 `memcpy` 一份**：`cam->mem[buf.index]` 是驱动 mmap 的 buffer，一旦 `QBUF`/`STOP`，驱动可能重写它；而 `send()` 可能因为客户端慢而阻塞。所以 grab 里要 `malloc(bytesused)` 再 `memcpy`，把这一帧“拿出来”
+  
+    ）
+  
+  ，该封装的封装（响应头信息等。主要是注意抽离：抽离做好了，封装自然也合理），全部完成后在主程序test_camera_preview中调用：先初始化http；再在poll中加一项，等待客户端发送请求；之后再调用我们http.c下的函数处理服务器响应，包括响应头和响应内容，响应头自己查资料拼，响应内容就用上面抽好的取一帧到内存的函数，客户端那边会根据我们响应头里声明的jpeg类型对二进制文件进行解析渲染；这样处理之后的程序框架如下：
+  
+  ```text
+      main
+       ├─ http_init()                    → 监听 8888
+       ├─ poll(摄像头, 触摸, http_fd)
+       │    └─ http_fd 可读
+       │         ├─ http_accept()        → cfd
+       │         ├─ http_serve_snapshot(cfd, &cam, &cfg)
+       │         │    ├─ recv(cfd)       ← 读 "GET /snapshot.jpg ..."
+       │         │    ├─ sscanf          ← 解析 method/path
+       │         │    ├─ camera_grap_jpeg()  ← 停流→MJPG→抓帧→拷到内存→切回 YUYV
+       │         │    ├─ send(cfd, hdr)      ← 200 + Content-Type/Length
+       │         │    ├─ send(cfd, jpeg)     ← 二进制
+       │         │    └─ close(cfd)
+       │         └─ continue             ← 这一轮不取帧，下一轮 poll 立刻拿到积压帧
+       └─ 正常取帧/转换/OSD/flip
+  ```
+  
+  另外还有一些细节问题，诸如“signal(SIGPIPE, SIG_IGN);   /* 浏览器提前断开时别把程序杀掉 */”、多处setsockopt函数的使用等，这些都是需要去了解的功能，这里不赘述，见obsidian；
+  
+- 按照上述文章配置网络环境时，虚拟机：192.168.10.100，主机：192.168.10.51，板子：用命令指定（ifconfig eth0 up；ifconfig eth0 192.168.10.50；ifconfig ）：192.168.10.50（用命令在终端指定，重启后就失效，因此后面改成写进/etc/network/interfaces里：
+
+  ```text
+  auto lo
+  iface lo inet loopback
+  
+  auto eth0
+  iface eth0 inet static
+      address 192.168.10.50
+      netmask 255.255.255.0
+  ```
+
+  vi /etc/network/interfaces后替换为以上内容，然后确认启动脚本会执行 `ifup -a`（一般在 `/etc/init.d/S40network` 里）。没有的话，手动加一个启动项，即可。），发现主机和虚拟机都ping不通板子，后面查找原因：板子有 **eth0 和 eth1 两个 MAC**，实际 PHY（**以太网物理层芯片（Physical Layer, PHY）**） 可能只焊了一个，或者网口丝印和 eth 编号对不上。所以最可能的情况就是：**IP 配在了 eth0，网线插在 eth1（或反过来）。**于是后面把 IP 配到 carrier=1 的那个口：
+
+  ```
+  ip addr flush dev eth0
+  ip addr add 192.168.10.50/24 dev eth1
+  ip link set eth1 up							/* 清空 eth0 上的 IP 地址，把 eth1 配置为 192.168.10.50/24，并启用 eth1 */
+  ```
+
+	​	再三者互相ping，果然就好了（但还有一个问题，虚拟机和板子ping不到主机，按照文章中的解决方案关掉pc防火墙，即可），于是顺带把上面/etc/network/interfaces里的eth0都换成eth1，这样以后板子重启就不用重新配ip了（另外最好保证USB 网卡每次插同一个 USB 口，以及换 USB 网卡后重新指定桥接设置）；
+
+- 这些都做好后上机实验，程序运行后电脑浏览器打开http://192.168.10.50:8888/snapshot.jpg能看到拍摄的相机画面，之后一直静止，刷新后能再次显示最新拍摄的画面，手机浏览器无效，因为板子通过网线接的pc，没做手机网络的互联，这在意料之中；但我萌生出想查看服务器响应头的想法，于是查找方法：1.curl -v http://192.168.10.50:8888/snapshot.jpg -o test.jpg：
+
+  （输出里：
+
+  ```
+  > GET /snapshot.jpg HTTP/1.1        ← 你发出去的请求
+  < HTTP/1.1 200 OK                  ← 服务器回的状态行
+  < Content-Type: image/jpeg         ← 告诉浏览器这是 JPEG
+  < Content-Length: 29104            ← 正文长度
+  < Connection: close
+  ```
+
+  `-o test.jpg` 表示把正文存成文件，而头呢，就留在终端。）
+
+  2.浏览器按 `F12` → **Network** 面板 → 刷新页面 → 点 `snapshot.jpg` → **Headers** → 看 `Response Headers`......，方法很多；
+
+- 我在试图理解当前Vm，pc，板子三者间的连接关系时，整理了以下这张图：
+
+  ![Vm_PC_board.png](pic/Vm_PC_board.png)
+
+  即：Vm通过NAT连PC访问外部Internet，Vm上通过桥接关联到PC网卡，又因为PC通过网线连接板子，于是Vm与板子成功建立互联；除此之外，Vm和板子以及PC和板子之间都有一条串口线建立连接，这就是三者之间的关系网；观察到一个有意思的现象并产生一个有趣的想法：当我给板子关机后，vm通过桥接到pc的路也断了，照理说VM桥接到PC 的 USB 网卡，再到网线，到板子，板子关闭后VM到PC的这个链路应该照样是通的，但实际却是断掉板子桥的这一边也断了，实际上：“一块以太网网卡的“链路状态”（carrier）取决于**对端有没有在发 link 信号**：
+
+  - 板子开机：板子的 PHY 工作，和 USB 网卡协商出 100M/全双工，`carrier = 1`；
+  - 板子关机：板子的 PHY 断电，USB 网卡收不到对端信号，`carrier = 0`，Windows 显示“媒体已断开”“。
+
+​		即：**桥接是“挂到 PC 那块网卡所在的线上”，线上没有对端，物理层就 down，VM 跟着断**。
+
+- 另外这里不桥接的话其实三者也能通：**VM 主动连板子**（出站），NAT 会把包交给主机，主机有 `192.168.10.0/24` 的路由（USB 网卡），能到板子。但**板子主动连 VM 就连不上**，因为 VM 藏在 NAT 后面。因此想实现三者互联的话要加桥接；
+
+     code -> git : 
+
+      ```
+       http: serve a single JPEG over HTTP (/snapshot.jpg)
+      ```
