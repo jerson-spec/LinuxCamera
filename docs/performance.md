@@ -336,6 +336,95 @@ DQbuf: 610390, Qbuf: 610390, Frames: 610390
 
 ---
 
+## 2026-11-19：MJPEG 推流，以及“空连接”这件事
+
+### 推流跑通了
+
+`/stream` 用 `multipart/x-mixed-replace` 推 MJPEG，Chrome 里能连续看。
+一次 5 分半的推流：
+
+```text
+14:39:52  stream start 800x600
+14:45:22  stream send: Broken pipe
+14:45:22  stream end (ret=-1)
+```
+
+浏览器直接关标签页，服务端 `send` 收到 EPIPE，恢复 YUYV 后继续预览。
+
+推流前 / 中 / 后的数据（`scripts/mon.sh` 每秒采一次）：
+
+| 阶段 | CPU | RSS | fd |
+|---|---|---|---|
+| 推流前 | 41% | 6340 kB | 8 |
+| 推流中（5m30s） | **1%** | 2588 kB | 9 |
+| 推流后 | 40% | 2588 kB | 8 |
+
+推流时 CPU 只有 1%，因为不做 YUYV 转换、也不画 framebuffer，只剩 USB 取帧和 `send`。
+RSS 从 6340 掉到 2588 是 buffer 重新申请的记账变化，不是泄漏；推流全程一条直线。
+
+### 刷新页面，dropped 一次涨 50
+
+第一次测的时候，每刷新一次 `/stream`，`dropped` 就 +49、+50：
+
+```text
+13:58:21.473  stream client closed
+13:58:21.562  client 192.168.10.51:53868     ← 又来了一个连接
+13:58:26.597  recv: Resource temporarily unavailable  ← 5 秒没收到请求
+13:58:27.645  fps ... dropped: 49
+```
+
+这条 53868 连接不是页面请求，是浏览器自己开的**空连接**（preconnect / socket 池），
+连上以后一个字节都不发。服务器这边 `recv` 设的是 5 秒超时，于是主循环在这条连接上
+停了 5 秒；这 5 秒里没人 DQBUF，摄像头的 4 个 buffer 很快被填满，驱动开始丢帧。
+
+恢复后先取出的 4 个 buffer 是旧帧（sequence 连续），下一帧的 sequence 已经跳了
+50 左右，`dropped` 就在这一刻把这段补上——所以是一次 +50，不是慢慢涨。
+
+**这 50 帧是真丢了，不是统计错**，只是丢的原因是我们自己把主循环堵住了。
+
+### 改成 300ms 之后
+
+`http_serve()` 里先 `poll(client_fd, 300ms)`，没有数据就直接 `idle client, close`，
+不再用 5 秒的 `recv` 超时硬等。再刷新三次：
+
+```text
+14:51:27  stream send: Broken pipe
+14:51:27  idle client, close
+14:51:48  stream client closed
+14:51:48  idle client, close
+14:52:02  stream client closed
+14:52:02  idle client, close
+```
+
+三次刷新 `dropped` 全部是 0，之后 10 分钟跑下来也只丢了 1 帧。
+
+### 为什么关标签页时还是 EAGAIN，不是 recv 返回 0
+
+EAGAIN 来自那条**空连接**，不是页面正在用的 `/stream` 连接。
+
+- 关标签页时，`/stream` 那条连接会断：要么 `send` 报 `Broken pipe`，要么 peek 到 FIN
+  打 `stream client closed`，两种都能退出来；
+- 浏览器开的空连接不一定跟着标签页一起关，它可能在 socket 池里多待一会儿。300ms 内
+  没等到 FIN，`recv` 就超时返回 EAGAIN，我们主动把它关掉。
+
+`recv` 返回 0 的前提是“收到 FIN 且没有数据”。如果对端是 RST（异常关闭），返回的是
+`ECONNRESET`；如果还没关，就是 EAGAIN。所以关标签页不一定能在空连接上看到 0，
+这不影响主流程——空连接 300ms 就清掉了。
+
+### 顺带记两笔
+
+- 有一次推流结束后 CPU 从 28% 涨到 58%，conv/draw 也跟着涨 1.6 倍，查下来更像 CPU
+  调频而不是代码变慢。以后对比性能前先看 `scaling_cur_freq`，或者临时切 `performance`。
+- 跑满 10 分钟，LCD 会被 console blank，`FBIOPAN_DISPLAY` 返回 EPERM，程序降级单缓冲。
+  演示前 `echo 0 > /sys/class/graphics/fb0/blank`。
+
+### 结论
+
+推流本身很轻（CPU 1%），真正的问题是**空连接把单线程主循环堵住**。
+300ms 超时之后，刷新页面不再丢帧；剩下的就是浏览器行为和统计口径，不是 bug。
+
+---
+
 ## 可选优化项
 
 1. **转换直接写 framebuffer 行**：把 `yuyv_to_rgb()` 和 `lcd_write_line_rgb888()` 合成一遍，

@@ -437,6 +437,9 @@ yuyv: hoist chroma terms per pixel pair, inline clamp, drop memcpy (conv 25.9 ->
   tag: touch-input-milestone
   ```
   
+  ```
+  tag: v1.0
+  ```
 
 
 
@@ -552,3 +555,59 @@ yuyv: hoist chroma terms per pixel pair, inline clamp, drop memcpy (conv 25.9 ->
       ```
        http: serve a single JPEG over HTTP (/snapshot.jpg)
       ```
+
+
+
+# [ http: MJPEG stream (/stream) with idle-connection timeout ]——26_11_19
+
+- 这部分的代码由ai辅助生成，ai生成的代码和函数用“修改”标识，修好后上机实验，发现浏览器每刷新一次http://192.168.10.50:8888/stream dropped就增长四十到五十的问题，后面截下日志让ai找出原因，问题在于空连接，具体见performance.md，这里不赘述；——自己通过日志排查，追踪程序运行顺序的话也能找出问题所在；
+  
+- 这里贴一张“stream”这部分代码的编写思路：
+  
+  ```
+      http_serve_stream(cfd, cam, cfg):
+          1. 发 multipart 响应头
+          2. camera_stop → S_FMT(MJPG) → camera_start     ← 只切一次
+          3. while (!g_stop):
+               poll/DQBUF → 发 "--frame\r\nContent-Type...\r\n\r\n" + JPEG + "\r\n" → QBUF
+               send 失败就 break
+          4. camera_stop → S_FMT(YUYV) → camera_start     ← 恢复预览
+          5. close(cfd)
+  ```
+
+- 上面这部分完成之后调整一下结构（原先 `http_serve_snapshot` 和 `http_serve_stream` 各自 `recv` + 解析，主循环没法先知道路径再选函数。）：
+
+	 ```
+  http_serve()          ← 只收一次请求、解析一次
+     ├─ /snapshot.jpg → serve_snapshot_body()
+     ├─ /stream       → serve_stream_body()
+     └─ 其他          → 404
+  ```
+
+  这样做之后结构更加干净，也减少了代码量；
+  
+  接下来主循环调用：
+  
+  ```
+  if (http_idx >= 0 && (fds[http_idx].revents & POLLIN)) {
+  	int cfd = http_accept(http_fd);
+  
+  	if (cfd >= 0)
+  		http_serve(cfd, &cam, &camera_cfg, &g_stop);
+  
+  	/* 拍照/推流都会 stop/start 流，sequence 要重置 */
+  	have_sequence = 0;
+  	poll_timeout_cnt = 0;
+  	continue;
+  }
+  ```
+  
+  这部分修改的总体框架是这样，具体见commit；
+  
+  code -> git : 
+  
+  ```
+   http: MJPEG stream (/stream) with idle-connection timeout
+  ```
+  
+  

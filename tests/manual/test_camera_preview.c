@@ -581,14 +581,16 @@ int main(int argc, char **argv)
 		}		
 
 		/*
-		 * HTTP 请求：http_accept 返回连接 fd，serve 里收请求、拍照、
-		 * 回响应并把 fd 关掉。拍照会 stop/start 流，所以 sequence 要重置。
+		 * 修改：HTTP 只留一个入口。
+		 * http_accept 拿到连接 fd 后交给 http_serve，
+		 * 由它解析路径并分发到 /snapshot.jpg 或 /stream。
+		 * 拍照/推流都会 stop/start 流，所以 sequence 要重置。
 		 */
 		if (http_idx >= 0 && (fds[http_idx].revents & POLLIN)) {
 			int cfd = http_accept(http_fd);
 
 			if (cfd >= 0)
-				http_serve_snapshot(cfd, &cam, &camera_cfg);
+				http_serve(cfd, &cam, &camera_cfg, &g_stop);
 
 			have_sequence = 0;
 			poll_timeout_cnt = 0;
