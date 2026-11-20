@@ -591,6 +591,9 @@ int main(int argc, char **argv)
 
 			if (cfd >= 0)
 				http_serve(cfd, &cam, &camera_cfg, &g_stop);
+			
+			/** 推流结束后把触摸队列清空，避免“补触发” **/
+			touch_flush(&tch);
 
 			have_sequence = 0;
 			poll_timeout_cnt = 0;

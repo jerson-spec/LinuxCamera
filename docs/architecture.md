@@ -1,6 +1,6 @@
 # 架构说明
 
-> 当前状态：**v1.0**（连续预览 + 双缓冲 + 定点转换 + 按行写 + letterbox + 触摸 + OSD + 拍照 + 8h 长跑）。
+> 当前状态：**v1.5**（预览 + 触摸 + OSD + 拍照 + 8h 长跑 + HTTP 单张/MJPEG 推流）。
 >
 > 本文描述当前真实代码结构，不描述理想中的最终架构。
 > 新会话请先读 `docs/handoff.md`，再读本文。
@@ -26,10 +26,11 @@ V4L2 采集 → YUYV 转换 → LCD 显示 → 拍照/存卡 → 网络推流
 
 拍照：camera_stop → S_FMT(MJPG) → start → 取一帧 → 写 .jpg → 切回 YUYV
 分辨率：800×600 / 640×480 / 352×288 轮换，letterbox 居中
+网络：浏览器 GET / → HTML；/snapshot.jpg → 单张；/stream → multipart MJPEG
 ```
 
 ```text
-v1.0：预览 + 触摸 + 拍照 + 切分辨率 + OSD + 8 小时稳定
+v1.5：预览 + 触摸 + 拍照 + 切分辨率 + OSD + 8h 长跑 + 网页推流
 ```
 
 ---
@@ -333,28 +334,40 @@ void camera_close(camera_t *cam);
 - `touch_read()` 返回 `-1 错误 / 0 无点击 / 1 点击`；
 - 这颗屏驱动报 800×480、实际发 1024×600，`main` 里用 `touch_set_range()` 覆盖。
 
-### 5.8 `tests/manual`
+### 5.8 `http`
+
+`include/http.h` / `src/http.c`，单客户端 HTTP 服务，端口 8888。
+
+- `http_init()`：socket/bind/listen，`SO_REUSEADDR`；
+- `http_accept()`：accept + 收发超时；
+- `http_serve()`：收一次请求、解析路径，分发到：
+  - `/` → 一小段 HTML（`<img src="/stream">`）；
+  - `/snapshot.jpg` → `camera_grap_jpeg()` 取一帧发回；
+  - `/stream` → 切一次 MJPG，循环 `DQBUF → send 分片 → QBUF`，退出恢复 YUYV；
+- 客户端连接先 `poll(300ms)`，浏览器预连接不发请求就直接关掉，避免堵住主循环。
+
+### 5.9 `tests/manual`
 
 | 程序 | 作用 |
 |---|---|
 | `test_Get_images.c` | V4L2 采集/枚举/保存 JPEG |
 | `test_Draw_region.c` | LCD 参数打印 + 绘制区域 |
 | `test_Trans_YUYV.c` | 合成 YUYV 色条 → RGB → LCD |
-| `test_camera_preview.c` | 连续预览 + 双缓冲 + 统计（v0.5 / W3） |
+| `test_camera_preview.c` | v1.5 主程序：预览 + 触摸 + 拍照 + OSD + HTTP |
 
-### 5.9 构建目标
+### 5.10 构建目标
 
 ```text
-camera_core          # config.c + log.c + lcd.c + yuyv.c + camera.c + osd.c + touch.c
+camera_core          # config.c + log.c + lcd.c + yuyv.c + camera.c + osd.c + touch.c + http.c
 camera               # src/main.c，配置检查占位
 test_Get_images      # 采集测试
 test_Draw_region     # LCD 区域测试
 test_Trans_YUYV      # YUYV 色条演示
-test_camera_preview  # v1.0 主程序：预览/触摸/拍照/切分辨率/OSD
+test_camera_preview  # v1.5 主程序
 config_test          # 配置测试
 ```
 
-`camera_core` 目前包含 Linux 专用的 `lcd.c` / `camera.c` / `touch.c`，所以整体是 Linux-only。
+`camera_core` 目前包含 Linux 专用的 `lcd.c` / `camera.c` / `touch.c` / `http.c`，所以整体是 Linux-only。
 
 ---
 
@@ -380,10 +393,11 @@ config_test          # 配置测试
 2. `yuyv_to_rgb()` 没有 stride 参数；
 3. `yuyv.c` 全局 `full` 状态；
 4. `lcd.c` 全局状态；`lcd_init()` 重置日志、`lcd_deinit()` 关闭日志；
-5. `app_config_t` 过大，touch/OSD 还没有配置项；
+5. `app_config_t` 过大，touch/OSD/http 还没有配置项；
 6. 配置路径分散，`lcd_init()` 会重复 load `lcd.ini`；
 7. 首帧延迟 1–1.6 s；切到 800×600 固定 1.7 s；
-8. 没有单元测试/CI；
+8. HTTP 单客户端、阻塞式；推流期间触摸不响应；
+9. 没有单元测试/CI；
 
 ---
 
@@ -394,20 +408,24 @@ config_test          # 配置测试
 - camera / osd / touch 已经拆成独立模块；
 - 8 小时长跑：610390 帧、0 错误、RSS/fd 不增长。
 
-### 下一步：v1.5 网络
+### v1.5 已完成（2026-11-20）
 
-- 先做 `/snapshot.jpg`：复用 `snapshot_mjpeg()` 的切格式逻辑，把图通过 HTTP 返回；
-- 再做 `/stream`：`multipart/x-mixed-replace` 推 MJPEG；
-- `/stream` 期间摄像头是 MJPG，本地预览会停——可以接受，或者做“推流时不显示”；
-- 单客户端跑通后再想多客户端和延迟。
+- http.c：`/`、`/snapshot.jpg`、`/stream`；
+- 推流切一次 MJPG，循环取帧发送，退出恢复 YUYV；
+- 300ms 空连接超时；1 小时推流 RSS/fd 不涨。
+
+### 下一步：W8–W9 驱动
+
+- 字符设备 → poll/等待队列 → input → I2C/regmap；
+- 有余力再看 UVC/V4L2 内核代码。
 
 ### v2.0 前要做的重构
 
-- `test_camera_preview.c` 已经 700 行，把主循环拆到 `src/app.c`；
+- `test_camera_preview.c` 已经 800 行，把主循环拆到 `src/app.c`；
 - 显示部分抽到 `src/display.c`；
 - `src/main.c` 只负责参数解析和编排；
 - 日志只在 main 初始化一次，`lcd.c` 不再碰日志；
-- 再拆 `app_config_t`，给 touch/OSD 加配置项；
+- 再拆 `app_config_t`，给 touch/OSD/http 加配置项；
 - 补单元测试（yuyv 转换、config 解析可以脱离硬件测）。
 
 ---

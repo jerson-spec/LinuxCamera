@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clock</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  #t {
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #0f0;
+    font: bold 16vw/1 monospace;
+    letter-spacing: 0.02em;
+  }
+</style>
+</head>
+<body>
+<div id="t">--:--:--.---</div>
+<script>
+function pad(n, w) {
+  return String(n).padStart(w, '0');
+}
+function tick() {
+  const d = new Date();
+  document.getElementById('t').textContent =
+    pad(d.getHours(), 2) + ':' +
+    pad(d.getMinutes(), 2) + ':' +
+    pad(d.getSeconds(), 2) + '.' +
+    pad(d.getMilliseconds(), 3);
+}
+setInterval(tick, 10);
+tick();
+</script>
+</body>
+</html>

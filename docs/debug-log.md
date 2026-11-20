@@ -610,4 +610,110 @@ yuyv: hoist chroma terms per pixel pair, inline clamp, drop memcpy (conv 25.9 ->
    http: MJPEG stream (/stream) with idle-connection timeout
   ```
   
+
+
+
+# [ http: stream UX and v1.5 docs ]——26_11_20
+
+- 增加了1.index_html，能实现：“根路径的首页，浏览器打开 http://板子IP:8888/ 就能看”，默认是/stream，点击“拍一张”切到拍照，也就是/snapshot，2.scripts/clock.html，点开之后显示报时，用摄像头拍他做对比，截屏测出延迟；但发现一个问题：点击“拍一张”之后浏览器端没有任何反应，仍然在预览；另外发现在浏览器预览阶段点击冻结的lcd触摸屏，当浏览器退出时lcd触摸屏开始对之前的点击做出反应，拍照或切换分辨率，是个比较有意思的现象；
+
+- 实际上这两个都是代码的疏漏，点击“拍一张”后浏览器会**导航到 `/snapshot.jpg`**，也就是把当前页面替换成那张 JPEG。它不会在预览页上叠加显示，也不会自动下载：
+
+  “因为服务器是单线程的，此刻正卡在 `serve_stream_body()` 里推流：
+
+  1. 点击链接 → 浏览器准备导航，但旧页面的 `/stream` 连接还开着；
+  2. 服务器还在给这条流发帧，**没有空去 accept `/snapshot.jpg` 这条新请求**；
+  3. 浏览器在等新页面，旧页面还在显示预览，看起来就是“点了没反应”；
+  4. 直到浏览器因为导航把流连接关掉，服务器才退出推流、恢复 YUYV、处理 `/snapshot.jpg`，然后显示那张图。
+
+  所以不是按钮坏了，是**单线程 + 长连接**导致的排队。”
+
+	于是对应修改：把链接改成按钮，点击时先把 `<img>` 的 `src` 清空，断开流，等 300ms 再导航：
+
+    ```
+    <img id="s" src="/stream">
+    <a href="#" onclick="shot(); return false;">拍一张</a>
+    <script>
+    function shot() {
+      document.getElementById('s').src = '';      // 断开 /stream
+      setTimeout(function(){ location.href = '/snapshot.jpg'; }, 300);
+    }
+    </script>
+    ```
+
+​	这样服务器先退出推流，再处理拍照请求，就不会卡住。代价是页面会被图片替换，想继续预览要按返回/刷新；
+
+- 而lcd屏的冻结：
+
+  这个现象是单线程 + 内核事件队列的必然结果：
+
+  1. 推流时主循环阻塞在 `serve_stream_body()`，不再 `DQBUF`；
+  2. 摄像头处于 MJPG，LCD 没有新的 YUYV 帧可画，所以**画面停在最后一帧**；
+  3. 点触摸屏时，事件并没有丢，而是被内核放进 **evdev 的队列**（有固定大小，几十个事件）；
+  4. 浏览器退出后，主循环回到 `poll`，看到触摸 fd 可读，`touch_read()` 一次把队列里的事件**全部读出来**；
+  5. `touch_read()` 只在 `BTN_TOUCH` 抬起时置 `tap=1`，坐标取最后一次，所以最终**只触发一次动作**——即“开始对之前的点击做出反应”。
+
+  如果期间点了很多下，只有**最后一次**生效（前面的都被同一次 `touch_read` 吞掉了）
   
+  于是对应修改：
+  
+   ```
+      /* touch.c 加一个函数 */
+      void touch_flush(touch_t *tch_p)
+      {
+          struct input_event ev;
+          while (read(tch_p->fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev))
+              ;
+      }
+   ```
+
+​	在test_camera_preview中 `http_serve()` 返回后调用一次，把推流期间积压的点击丢掉；
+
+- 关于一个小时切换的实验，启动一次标签页时出现两次“ GET /”，"http: stream end"，并且第一次“GET”最后是立马就关闭了，出现“closed，”ret = 0或“Broken pipe”，“ret = -1”， 只开一个标签页居然出现两次“GET”，并且一次出现立马就关闭，有时候是成功关闭，有时候是“Broken”关闭，一次是等到十分钟后我们自己关闭，这个实验现象也非常奇怪：
+
+  ```
+  11:04:18.467  GET /            ← 第 1 次页面加载
+  11:04:18.803  GET /stream
+  11:04:18.880  stream start
+  11:04:19.510  Broken pipe      ← 第 1 条流被取消
+  11:04:19.602  stream end (ret=-1)
+  11:04:19.602  GET /            ← 第 2 次页面加载
+  11:04:19.682  GET /stream
+  11:04:19.729  stream start
+  11:14:04.533  stream client closed   ← 这条流活了 10 分钟
+  ```
+
+  后面经ai介绍，常见原因有：
+
+  1. **刷新了一次**（打开后觉得没出来，按了 F5)；
+  2. Chrome 的“预加载页面”（Preload pages）先取了一次，真正导航时又取一次，预加载那条被取消；
+  3. 会话恢复/重新打开标签页，Chrome 先恢复一次再走一次；
+  4. 浏览器扩展的自动刷新；
+  5. 双击书签/连按两次回车。
+
+  服务端日志只记录了请求行，没有 `User-Agent`/`Referer`，所以分不清是哪种；
+-  而为什么第一条流后面“立马就关了”，而且有时 `ret=0`、有时 `ret=-1`：
+
+  因为第一条流所属的页面被第二次导航替换掉了，浏览器会关掉那条连接。关闭方式不同，服务端看到的结果就不同：
+
+  | 浏览器行为                         | 服务端看到                 | 返回     |
+  | ---------------------------------- | -------------------------- | -------- |
+  | 正常关闭（FIN），且 peek 先看到    | `stream client closed`     | `ret=0`  |
+  | 取消请求时发 RST，或 `send` 先撞上 | `stream send: Broken pipe` | `ret=-1` |
+
+  两者都是正常关闭，只是 FIN 和 RST 的时机不同，日志里第二段： `client closed / ret=0` 就是手动关页面/刷新时的“正常关闭”。
+
+  所以归根结底，上述现象都不是代码问题，而在于浏览器行为的差异，我们的代码能正确处理上述“异常”，不影响相机正常功能；
+
+   code -> git : 
+
+      http: stream UX and v1.5 docs
+  
+      tag: v1.5
+
+​		
+
+
+
+​		
+

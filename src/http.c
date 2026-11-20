@@ -41,6 +41,38 @@ static const char multipart[] =
 	"Connection: close\r\n"
 	"\r\n";
 
+/* 修改：根路径的首页，浏览器打开 http://板子IP:8888/ 就能看 */
+static const char index_html[] =
+	"<!doctype html>\n"
+	"<html lang=\"zh\">\n"
+	"<head>\n"
+	"<meta charset=\"utf-8\">\n"
+	"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+	"<title>LinuxCamera</title>\n"
+	"<style>\n"
+	"body{margin:0;background:#111;color:#eee;font-family:sans-serif;text-align:center}\n"
+	"h3{margin:12px 0}\n"
+	"img{width:100%;max-width:1024px;background:#000}\n"
+	"a{color:#8cf}\n"
+	"p{margin:10px}\n"
+	"</style>\n"
+	"</head>\n"
+	"<body>\n"
+	"<h3>LinuxCamera</h3>\n"
+	"<img id=\"s\" src=\"/stream\" alt=\"stream\">\n"
+	"<p><a href=\"#\" onclick=\"shot(); return false;\">拍一张</a></p>\n"
+	"<p style=\"color:#888;font-size:12px\">Android Chrome 可看实时流；"
+	"iPhone Safari 不支持 MJPEG 流，可点“拍一张”。</p>\n"
+	"<script>\n"
+	"function shot() {\n"
+	"  document.getElementById('s').src = '';\n"
+	"  setTimeout(function(){ location.href = '/snapshot.jpg'; }, 300);\n"
+	"}\n"
+	"</script>\n"
+	"</body>\n"
+	"</html>\n";
+
+
 /* 修改：每个 MJPEG 分片的头，循环里只发它，不再重复发整个 HTTP 响应头 */
 #define PART_HDR_FMT \
 	"--frame\r\n" \
@@ -280,6 +312,32 @@ restore:
 }
 
 /*
+ * 修改：首页，返回一小段 HTML。
+ * 页面里的 <img src="/stream"> 会让浏览器再发一个 /stream 请求。
+ */
+static int serve_index(int client_fd)
+{
+	char hdr[192];
+	int hlen;
+
+	hlen = snprintf(hdr, sizeof(hdr),
+	                "HTTP/1.1 200 OK\r\n"
+	                "Content-Type: text/html; charset=utf-8\r\n"
+	                "Content-Length: %lu\r\n"
+	                "Cache-Control: no-store\r\n"
+	                "Connection: close\r\n"
+	                "\r\n",
+	                (unsigned long)(sizeof(index_html) - 1));
+	if (hlen < 0 || hlen >= (int)sizeof(hdr))
+		return -1;
+
+	if (send_all(client_fd, hdr, (size_t)hlen) < 0)
+		return -1;
+
+	return send_all(client_fd, index_html, sizeof(index_html) - 1);
+}
+
+/*
  * 修改：统一入口。
  * 只 recv 一次、解析一次，再按路径分给 snapshot 或 stream。
  * client_fd 由本函数关闭。
@@ -322,7 +380,9 @@ int http_serve(int client_fd, camera_t *cam, const app_config_t *cfg,
 		goto out;
 	}
 
-	if (strcmp(path, "/snapshot.jpg") == 0)
+	if (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0)
+		ret = serve_index(client_fd);
+	else if (strcmp(path, "/snapshot.jpg") == 0)
 		ret = serve_snapshot_body(client_fd, cam, cfg);
 	else if (strcmp(path, "/stream") == 0)
 		ret = serve_stream_body(client_fd, cam, cfg, stop);

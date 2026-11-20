@@ -1,9 +1,9 @@
 # 板子与环境
 
-> 本文记录当前开发板、设备节点、工具链、构建、部署和调试方式。
+> 本文记录当前开发板、设备节点、网络、工具链、构建、部署和调试方式。
 > 如果换了板子、SDK 或摄像头，先更新本文。
 >
-> 当前阶段：v1.0（8 小时长跑通过）。
+> 当前阶段：v1.5（网页推流 1 小时通过）。
 
 ---
 
@@ -13,15 +13,17 @@
 |---|---|
 | 板子 | 100ask i.MX6ULL |
 | CPU 架构 | ARMv7，32-bit，hard-float |
-| 系统 | Linux |
+| 系统 | Linux（Buildroot） |
 | 摄像头 | USB UVC，当前节点 `/dev/video1` |
 | 摄像头请求分辨率 | 1024×600 |
 | 摄像头实际输出 | **800×600 YUYV**（驱动调整；640×480 可跑 30fps） |
 | 摄像头 `bytesperline` | **1600 = 800 × 2**（640×480 时 1280） |
 | LCD | `/dev/fb0`，**1024×600，32bpp** |
+| 触摸 | `/dev/input/event1` |
 | 显示结果 | letterbox 居中，左右各 112 像素黑色 |
-| 主机 | Ubuntu 虚拟机 |
-| 连接方式 | ADB（USB），当前未配置板子 IP |
+| 主机 | Windows + VMware/Ubuntu 虚拟机 |
+| 连接方式 | USB 转网口直连 + 串口（USB-TTL）+ ADB |
+| 板子 IP | **192.168.10.50** |
 | 交叉工具链 | 100ask Buildroot SDK |
 
 黑边原因：
@@ -30,6 +32,78 @@
 - `VIDIOC_S_FMT` 协商后返回 800×600；
 - 代码按实际分辨率做 letterbox 居中（W3 起）；
 - 铺满需要缩放，属于 v1.0 之后的事。
+
+### 1.1 网络连接
+
+笔记本没有网口，用 USB 转网口和板子直连，不经过路由器：
+
+```text
+Windows
+  USB 网卡  192.168.10.1/24
+      │  网线
+      ▼
+  板子 eth0 192.168.10.50/24
+
+VMware（Ubuntu）
+  VMnet0 桥接到 USB 网卡
+  Ubuntu    192.168.10.2/24，不设网关
+```
+
+VM 的默认路由仍走 NAT，桥接网卡只负责和板子通信。
+
+板子上临时配置：
+
+```bash
+ip link set eth0 up
+ip addr add 192.168.10.50/24 dev eth0
+ping 192.168.10.1
+```
+
+如果 `eth0` 是 `NO-CARRIER`，换 `eth1` 试；用
+`cat /sys/class/net/eth0/carrier` 确认哪个口真的有链路。
+
+开机自动配置（Buildroot 没有 ifupdown 时）：
+
+```sh
+cat > /etc/init.d/S99network <<'EOF'
+#!/bin/sh
+case "$1" in
+  start)
+    ip link set eth0 up
+    ip addr add 192.168.10.50/24 dev eth0 2>/dev/null
+    ;;
+  stop)
+    ip addr flush dev eth0
+    ;;
+esac
+EOF
+chmod +x /etc/init.d/S99network
+```
+
+如果板子上有 `/etc/network/interfaces` 和 `ifup`，也可以写 static stanza。
+
+Windows 侧：USB 网卡手动配 `192.168.10.1/24`，网关和 DNS 留空；
+网络位置设成“专用”，否则防火墙会挡 ping。
+
+VMware 侧：虚拟机设置里加一块“桥接”网卡，虚拟网络编辑器把 VMnet0
+**手动指定**成 USB 网卡（不要用“自动”，自动经常桥到 Wi-Fi 上）。
+
+验证：
+
+```bash
+# 板子
+ping 192.168.10.1
+ping 192.168.10.2
+
+# Windows
+ping 192.168.10.50
+
+# Ubuntu
+ping 192.168.10.50
+```
+
+直连的副作用：板子关机时 USB 网卡会 `NO-CARRIER`，VM 的桥接网卡跟着断；
+这是正常的物理层行为，不是配置错误。
 
 ---
 
@@ -182,7 +256,8 @@ grep CMAKE_C_COMPILER build-arm/CMakeCache.txt
 
 ## 5. 部署
 
-当前板子通过 ADB 连接，没有配置网络 IP。
+板子现在有 IP `192.168.10.50`，但 Buildroot 没开 ssh，部署仍走 ADB。
+（以后开了 ssh/scp 可以直接走网络。）
 
 ```bash
 adb devices
@@ -194,6 +269,8 @@ adb push build-arm/test_Get_images /root/LinuxCamera/
 adb push build-arm/test_Draw_region /root/LinuxCamera/
 adb push build-arm/test_Trans_YUYV /root/LinuxCamera/
 adb push build-arm/test_camera_preview /root/LinuxCamera/
+adb push scripts/soak_test.sh /root/LinuxCamera/
+adb push scripts/mon.sh /root/LinuxCamera/
 
 adb push config/camera.ini /root/LinuxCamera/config/
 adb push config/lcd.ini /root/LinuxCamera/config/
@@ -201,7 +278,14 @@ adb push config/trans.ini /root/LinuxCamera/config/
 
 adb shell
 cd /root/LinuxCamera
-chmod +x test_Get_images test_Draw_region test_Trans_YUYV test_camera_preview
+chmod +x test_Get_images test_Draw_region test_Trans_YUYV test_camera_preview soak_test.sh mon.sh
+```
+
+程序跑起来后，网络这边可以直接测：
+
+```bash
+curl -v http://192.168.10.50:8888/
+curl -v http://192.168.10.50:8888/snapshot.jpg -o test.jpg
 ```
 
 Debug 版：
@@ -242,7 +326,7 @@ adb push build-arm-dbg/test_camera_preview /root/LinuxCamera/test_camera_preview
 ./test_Trans_YUYV
 ```
 
-### 6.5 摄像头预览 + 触摸（v1.0）
+### 6.5 摄像头预览 + 触摸（v1.5）
 
 ```bash
 ./test_camera_preview
@@ -284,6 +368,22 @@ RSS/fd/温度/剩余空间/图片数，日志在 `soak/` 下。
 - `VmRSS` 在 1472–6548 kB 之间摆，`VmHWM 7104 kB`，无上升趋势；
 - `fd=7` 全程不变；温度 68.1–70.6 ℃；
 - 收尾 `DQbuf = Qbuf = Frames = 610390`。
+
+### 6.7 浏览器访问
+
+板子和电脑/手机在同一网络后：
+
+```text
+http://192.168.10.50:8888/                首页
+http://192.168.10.50:8888/stream          MJPEG 流
+http://192.168.10.50:8888/snapshot.jpg    单张
+```
+
+- 推流时摄像头切 MJPG，本地 LCD 预览暂停，断开后自动恢复；
+- 网页“拍一张”只回图，不写 `images/`；
+- iOS Safari 不支持 MJPEG 流；
+- 实测延迟：800×600 约 311 ms、640×480 约 276 ms；
+- 1 小时推流：26856 帧、dropped 8、RSS/fd 不增长。
 
 ---
 
@@ -336,7 +436,7 @@ p lcd_var_screeninfo_t
 
 - 远程调试不用 `r`，用 `c`；
 - 程序退出后 gdbserver 结束；
-- 当前板子没有 IP，通过 ADB 转发；
+- gdb 仍走 ADB 转发；板子现在有 `192.168.10.50`，HTTP 直接访问；
 - `scripts/gdb.sh` 目前不完整，先使用上面的命令。
 
 ---
@@ -363,12 +463,13 @@ p lcd_var_screeninfo_t
 
 ## 9. 当前限制
 
-- 板子没有 IP，gdb 走 ADB；
+- 板子有静态 IP `192.168.10.50`，但 gdb 仍走 ADB；
 - 摄像头 800×600@15fps / 640×480@30fps，LCD 1024×600，letterbox 居中；
 - 暗光下自动曝光会主动降帧，不是丢帧；
 - 触摸驱动报的范围是 800×480，实际是 1024×600，代码里已覆盖；
 - `lcd_write_line_rgb888()` 只支持 32bpp；
-- 没有缩放、没有网络；
+- 推流时本地预览暂停；网页“拍一张”不落盘；iOS Safari 不支持 MJPEG 流；
+- 没有缩放、没有多客户端/鉴权/HTTPS；
 - 切到 800×600 固定 1.7 s，首帧延迟 1–1.6 s；
 - 温度长跑稳定在 68–71℃。
 

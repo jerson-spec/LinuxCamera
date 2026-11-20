@@ -19,7 +19,7 @@
 | 项目 | 当前值 |
 |---|---|
 | 项目 | i.MX6ULL Linux 相机 |
-| 当前阶段 | **v1.0 完成（8 小时长跑通过）** |
+| 当前阶段 | **v1.5 功能完成（网页推流 1 小时通过）** |
 | 语言 | C |
 | 采集 | V4L2 MMAP（4 buffer，poll 超时 2 s，`VIDIOC_S_PARM` 请求帧率） |
 | 显示 | `/dev/fb0` framebuffer + 双缓冲 + letterbox |
@@ -30,19 +30,21 @@
 | LCD | **1024×600，32bpp，`line_length = 4096`** |
 | 双缓冲 | `yres_virtual = 1200`，`FBIOPAN_DISPLAY`，失败自动降级 |
 | 显示结果 | letterbox 居中；800×600 时左右各 112 像素黑边 |
-| 实测 | 800×600：conv 14.0，draw 8.6，CPU 34%；640×480：conv 9.4，draw 5.5 |
+| 实测 | 800×600：conv 14.0，draw 8.6；640×480：conv 9.4，draw 5.5 |
 | 交互 | 触摸：左半边拍照、右半边切分辨率；`SIGUSR1`/`SIGUSR2` 也能触发 |
-| 拍照 | 切 MJPG 取一帧直接写 `.jpg`，46–48 KB（800×600）/ 24 KB（640×480） |
+| 拍照 | 切 MJPG 取一帧直接写 `.jpg`，33–48 KB（800×600）/ 24 KB（640×480） |
 | 长跑 | 8 h，610390 帧，0 错误，VmRSS 不涨，fd=7 不变，温度 68–71℃ |
+| 网络 | 板子 192.168.10.50，PC 192.168.10.1，VM 192.168.10.2（直连 + 桥接） |
+| HTTP | `/` 首页、`/snapshot.jpg`、`/stream`（MJPEG），端口 8888 |
+| 推流 | 1 h，26856 帧，dropped 8，RSS/fd 不涨；延迟 800×600 约 311 ms / 640×480 约 276 ms |
 | 工具链 | 100ask Buildroot SDK |
-| 连接 | ADB，无板子 IP |
-| 当前标签 | `v1.0` |
-| 下一步 | **v1.5：MJPEG over HTTP；之后进内核/驱动** |
+| 当前标签 | `v1.0`；`v1.5` 功能已验证 |
+| 下一步 | **W8–W9 驱动（字符设备 → poll → input → I2C）** |
 | 当前不是 | v2.0 |
 
 一句话：
 
-> **v1.0 已经能跑：预览、居中、触摸拍照、切分辨率、OSD，8 小时不掉线；下一步是联网和驱动。**
+> **v1.5 已经能跑：LCD 预览、触摸拍照、切分辨率，浏览器看 MJPEG 流（约 300ms）；下一步进驱动。**
 
 ---
 
@@ -121,14 +123,23 @@ LinuxCamera/
 │   ├── lcd.ini
 │   └── trans.ini
 ├── include/
+│   ├── camera.h
 │   ├── config.h
-│   ├── log.h
+│   ├── http.h
 │   ├── lcd.h
+│   ├── log.h
+│   ├── osd.h
+│   ├── snapshot.h
+│   ├── touch.h
 │   └── yuyv.h
 ├── src/
+│   ├── camera.c
 │   ├── config.c
-│   ├── log.c
+│   ├── http.c
 │   ├── lcd.c
+│   ├── log.c
+│   ├── osd.c
+│   ├── touch.c
 │   ├── yuyv.c
 │   └── main.c
 ├── tests/
@@ -147,6 +158,7 @@ LinuxCamera/
 │   ├── roadmap.md
 │   ├── handoff.md
 │   ├── release-v1.0.md
+│   ├── release-v1.5.md
 │   ├── debug-log.md
 │   └── performance.md
 ├── scripts/
@@ -154,7 +166,11 @@ LinuxCamera/
 │   ├── build_dbg.sh
 │   ├── deploy.sh
 │   ├── deploy_dbg.sh
-│   └── gdb.sh
+│   ├── gdb.sh
+|	├──	setup_env.sh
+│   ├── soak_test.sh
+│   ├── mon.sh
+│   └── clock.html
 ├── build-arm/
 └── stage/
 ```
@@ -179,14 +195,18 @@ LinuxCamera/
 - **640×480@30 已验证（`VIDIOC_S_PARM` 请求帧率）**；
 - **触摸输入：`touch.c`，左半边拍照、右半边切分辨率（v1.0）**；
 - **OSD：`osd.c`，8×16 点阵，显示分辨率/帧率/丢帧（v1.0）**；
-- **8 小时长跑通过（610390 帧、0 错误、RSS/fd 不增长）**。
+- **8 小时长跑通过（610390 帧、0 错误、RSS/fd 不增长）**；
+- **HTTP：`/` 首页、`/snapshot.jpg` 单张、`/stream` MJPEG 连续流（v1.5）**；
+- **空连接 300ms 超时，刷新不再掉 50 帧（v1.5）**；
+- **1 小时推流：26856 帧、dropped 8、RSS/fd 不增长；延迟 800×600 约 311 ms / 640×480 约 276 ms（v1.5）**。
 
 ### 2.3 还没做的功能
 
-- 网络推流（v1.5）；
 - 缩放（放大/缩小）；
+- 多客户端、鉴权、HTTPS；
+- 本地预览 + 网页推流同时（摄像头同一时刻只能一种格式）；
 - 分层重构、单元测试、Buildroot 精简、开机自启、看门狗（v2.0）；
-- 内核/驱动方向（W8–W9）。
+- 内核/驱动方向（W8–W9，下一步）。
 
 ### 2.4 各程序状态
 
@@ -195,8 +215,10 @@ LinuxCamera/
 | `test_Get_images` | ✅ | 采集/枚举/保存 JPEG（文件名用格式名作后缀） |
 | `test_Draw_region` | ✅ | LCD 参数 + 区域绘制 |
 | `test_Trans_YUYV` | ✅ | 合成 YUYV 色条 → RGB → LCD |
-| `test_camera_preview` | ✅ | **v1.0 主程序**：预览 + 触摸 + 拍照 + 切分辨率 + OSD |
+| `test_camera_preview` | ✅ | **v1.5 主程序**：预览 + 触摸 + 拍照 + 切分辨率 + OSD + HTTP |
 | `soak_test.sh` | ✅ | 长跑脚本，定时拍照/切分辨率/采样 |
+| `mon.sh` | ✅ | 每秒记录 CPU/RSS/fd，推流时用 |
+| `clock.html` | ✅ | PC 上的毫秒时钟，测延迟用 |
 | `config_test` | ✅ | 配置读取/打印 |
 | `camera` | ✅ 可编译 | 当前只是配置检查占位，不是正式主程序 |
 
@@ -210,7 +232,26 @@ LinuxCamera/
 - ARMv7 32-bit hard-float；
 - 摄像头 `/dev/video1`；
 - LCD `/dev/fb0`，1024×600；
-- 当前通过 ADB 连接，没有配置板子 IP。
+- 触摸 `/dev/input/event1`；
+- 板子 IP `192.168.10.50`（USB 转网口直连 PC）；
+- 串口是 USB-TTL，115200 8N1；ADB 仍可用于部署。
+
+网络拓扑：
+
+```text
+Windows USB 网卡 192.168.10.1/24 ──网线── 板子 eth0 192.168.10.50/24
+VMware VMnet0 桥接到 USB 网卡，Ubuntu 192.168.10.2/24（不设网关）
+```
+
+板子临时配置：
+
+```bash
+ip link set eth0 up
+ip addr add 192.168.10.50/24 dev eth0
+```
+
+要开机自动配置，就写 `/etc/init.d/S99network`（Buildroot 没有 ifupdown 时），
+或者写 `/etc/network/interfaces`（有 ifup 时）。
 
 确认：
 
@@ -220,6 +261,8 @@ ls -l /dev/video*
 ls -l /dev/fb*
 fbset -i
 v4l2-ctl -d /dev/video1 --list-formats-ext
+ip addr
+ping 192.168.10.1
 ```
 
 ### 3.2 摄像头实际分辨率
@@ -324,7 +367,7 @@ c
 
 - 远程调试不用 `r`，用 `c`；
 - 程序退出后 gdbserver 结束；
-- 当前板子没有 IP，走 ADB；
+- gdb 仍走 ADB；板子已有 `192.168.10.50`，HTTP 直接访问；
 - `scripts/gdb.sh` 目前不完整，先用命令。
 
 ---
@@ -630,28 +673,37 @@ VmRSS 在 1472–6548 kB 之间摆但下限不变，fd 恒为 7，温度 68–70
 - [x] OSD 正常；
 - [x] 8 小时不崩。
 
+### 6.7 v1.5：网页推流（已完成，2026-11-20）
+
+- `src/http.c`：`/` 首页、`/snapshot.jpg`、`/stream`（MJPEG）；
+- 推流时只切一次 MJPG，循环 `DQBUF → send → QBUF`，退出恢复 YUYV；
+- `http_serve()` 先 `poll(client_fd, 300ms)`，浏览器预连接不会堵住主循环；
+- 延迟实测：800×600 约 311 ms、640×480 约 276 ms；
+- 1 小时推流：26856 帧、dropped 8、RSS/fd 不增长。
+
 ---
 
 ## 7. 后续路线
 
-v1.0 已完成，下面只写还没做的。
+v1.5 已完成，下面只写还没做的。
 
-### v1.5 网络（下一步）
+### v1.5（已完成）
 
-- [ ] 板子联网：`udhcpc -i eth0` 或静态 IP，Ubuntu 能 ping 通；
-- [ ] 最小 HTTP 服务：`src/http.c`，单客户端，先支持 `GET /snapshot.jpg`；
-- [ ] 把 `snapshot_mjpeg()` 拆成“取一帧到内存”和“写文件”，HTTP 返回内存里的 JPEG；
-- [ ] `GET /stream`：`multipart/x-mixed-replace` 推 MJPEG；
-- [ ] 处理 `SIGPIPE`、部分写、客户端断开；
-- [ ] 推流时摄像头是 MJPG，本地预览会停——接受，并在 README 写清楚；
-- [ ] 延迟 < 300 ms，断开重连不崩；
-- [ ] 打 `v1.5`。
+- [x] 板子联网：静态 IP 192.168.10.50，PC/VM 能 ping 通；
+- [x] `src/http.c`：单客户端，`/`、`/snapshot.jpg`、`/stream`；
+- [x] 拍照拆成 `camera_grap_jpeg()` + `snapshot_save()`；
+- [x] `multipart/x-mixed-replace` 推 MJPEG；
+- [x] `SIGPIPE`、部分写、客户端断开、300ms 空连接超时；
+- [x] 延迟 800×600 约 311 ms、640×480 约 276 ms；
+- [x] 10 次开关稳定、1 小时推流 RSS/fd 不涨；
 
-### v2.0 工程化 + 驱动
+### v2.0 工程化 + 驱动（下一步是驱动）
 
 - [ ] `test_camera_preview.c` 拆成 `src/app.c` + `display.c`；
 - [ ] 拆 `app_config_t`，给 http/touch/osd 加配置；
 - [ ] 单元测试：`yuyv_to_rgb`、config 解析可以脱离硬件测；
+- [ ] 多客户端 / 鉴权 / HTTPS；
+- [ ] 本地预览 + 网页推流同时（先测 libjpeg-turbo 编解码开销）；
 - [ ] Buildroot 精简镜像；
 - [ ] 开机自启 + 看门狗；
 - [ ] 驱动方向：字符设备 → poll/等待队列 → input → I2C/regmap → V4L2/UVC 内核代码。
@@ -672,7 +724,9 @@ v1.0 已完成，下面只写还没做的。
 8. 配置路径分散，`lcd_init` 会重复 load `lcd.ini`；
 9. `src/main.c` 仍是占位程序；
 10. 首帧延迟 1–1.6 s；切到 800×600 固定 1.7 s；
-11. 无单元测试/CI；`scripts/` 里只有 build/deploy/gdb/soak，没有统一入口。
+11. HTTP 是单客户端、阻塞式；推流期间触摸不响应，退出后可能补触发一次；
+12. 网页“拍一张”只回图，不落盘；
+13. 无单元测试/CI；`scripts/` 里只有 build/deploy/gdb/soak/mon，没有统一入口。
 
 ---
 

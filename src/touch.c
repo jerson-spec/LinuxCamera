@@ -158,6 +158,13 @@ int touch_read(touch_t *tch_p, int *x, int *y)
 	return 1;                         /* 1 = 有点击，把坐标带出去 */
 }
 
+/* 清空  触摸事件 */
+void touch_flush(touch_t *tch_p)
+{
+    struct input_event ev;
+    while (read(tch_p->fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev))
+        ;
+}
 
 void touch_close(touch_t *tch_p)
 {

@@ -20,6 +20,8 @@ void touch_set_range(touch_t *tch_p, int x_min, int x_max, int y_min, int y_max)
 
 int touch_read(touch_t *tch_p, int *x ,int *y);
 
+void touch_flush(touch_t *tch_p);
+
 void touch_close(touch_t *tch_p);
 
 #endif

@@ -2,7 +2,7 @@
 
 基于 i.MX6ULL + Linux V4L2 的相机项目。
 
-> **当前状态：v1.0（可用版）**
+> **当前状态：v1.5（能联网看）**
 >
 > 已实现：
 > - V4L2 MMAP 采集、格式/分辨率枚举、MJPEG 保存 JPEG
@@ -13,11 +13,14 @@
 > - 定点转换 + 按行写 framebuffer：CPU 忙占比 98% → 34%（W3）
 > - 多分辨率（800×600 / 640×480 / 352×288）+ letterbox 居中（W3）
 > - 触摸拍照、OSD、MJPEG 拍照存卡（v1.0）
-> - **8 小时长跑：610390 帧、0 错误、内存和 fd 都不增长（v1.0）**
+> - 8 小时长跑：610390 帧、0 错误、内存和 fd 都不增长（v1.0）
+> - **HTTP：`/` 首页、`/snapshot.jpg` 单张、`/stream` MJPEG 连续流（v1.5）**
+> - **1 小时网页推流：RSS/fd 不增长，延迟约 280–310 ms（v1.5）**
 >
 > 尚未实现：
 > - 缩放（放大/缩小）
-> - 网络推流（v1.5）
+> - 本地预览和网页推流同时进行（摄像头同一时刻只能一种格式）
+> - 多客户端、鉴权、HTTPS（v2.0）
 > - 开机自启 / 看门狗 / Buildroot 精简（v2.0）
 >
 
@@ -66,8 +69,13 @@
 | OSD（分辨率 / 帧率 / 丢帧） | ✅ v1.0 已验证 |
 | MJPEG 拍照存卡 | ✅ v1.0 已验证 |
 | 8 小时稳定性 | ✅ 610390 帧 / 0 错误 |
+| HTTP 首页 `/` | ✅ v1.5 已验证 |
+| `/snapshot.jpg` 单张 | ✅ v1.5 已验证 |
+| `/stream` MJPEG 连续流 | ✅ v1.5（Android Chrome；iOS Safari 不支持） |
+| 网页推流 1 小时 | ✅ RSS/fd 不增长，延迟约 300 ms |
 | 缩放（放大/缩小） | ❌ 未实现 |
-| 网络推流 | ❌ v1.5 |
+| 本地预览 + 网页推流同时 | ❌ 摄像头同一时刻只能一种格式 |
+| 多客户端 / 鉴权 / HTTPS | ❌ v2.0 |
 
 ---
 
@@ -190,6 +198,22 @@ while (!g_stop)
 - 只画后台，画完 `FBIOPAN_DISPLAY` 切到前台；
 - pan 失败会自动降级为单缓冲并继续运行。
 
+### 网页推流（v1.5）
+
+```text
+浏览器 GET /            → 返回 HTML（<img src="/stream">）
+浏览器 GET /stream      → 返回 multipart 响应头
+    循环：DQBUF(MJPG) → send("--frame" + JPEG + CRLF) → QBUF
+浏览器关闭 / FIN        → send 失败或 peek 到 0 → 退出循环
+                        → camera_stop → YUYV → camera_start（恢复 LCD）
+```
+
+要点：
+
+- 推流只切一次 MJPG，不是每帧切；
+- 本地 LCD 在推流期间暂停，断开后恢复；
+- 浏览器预连接 300ms 没请求就直接关，避免堵住主循环。
+
 ---
 
 ## 目录结构
@@ -199,7 +223,6 @@ LinuxCamera/
 ├── CMakeLists.txt
 ├── README.md
 ├── LICENSE.txt
-├── .gitignore
 ├── cmake/
 │   └── toolchain-arm.cmake
 ├── config/
@@ -207,14 +230,23 @@ LinuxCamera/
 │   ├── lcd.ini
 │   └── trans.ini
 ├── include/
+│   ├── camera.h
 │   ├── config.h
-│   ├── log.h
+│   ├── http.h
 │   ├── lcd.h
+│   ├── log.h
+│   ├── osd.h
+│   ├── snapshot.h
+│   ├── touch.h
 │   └── yuyv.h
 ├── src/
+│   ├── camera.c
 │   ├── config.c
-│   ├── log.c
+│   ├── http.c
 │   ├── lcd.c
+│   ├── log.c
+│   ├── osd.c
+│   ├── touch.c
 │   ├── yuyv.c
 │   └── main.c
 ├── tests/
@@ -233,6 +265,7 @@ LinuxCamera/
 │   ├── roadmap.md
 │   ├── handoff.md
 │   ├── release-v1.0.md
+│   ├── release-v1.5.md
 │   ├── debug-log.md
 │   └── performance.md
 ├── scripts/
@@ -240,7 +273,11 @@ LinuxCamera/
 │   ├── build_dbg.sh
 │   ├── deploy.sh
 │   ├── deploy_dbg.sh
-│   └── gdb.sh
+│   ├── gdb.sh
+|	├──	setup_env.sh
+│   ├── soak_test.sh
+│   ├── mon.sh
+│   └── clock.html
 ├── build-arm/
 └── stage/
 ```
@@ -576,6 +613,23 @@ nohup ./soak_test.sh 8 >/dev/null 2>&1 &     # 8 小时；传 1 就是 1 小时
 每 10 分钟拍一张、每 30 分钟切一次分辨率、每 60 秒记录 RSS/fd/温度，
 结果写在 `soak/` 下。8 小时的实测数据见 `docs/performance.md`。
 
+### 7. 浏览器访问（v1.5）
+
+板子和电脑/手机在同一网络后，直接打开：
+
+```text
+http://192.168.10.50:8888/                首页（实时流 + 拍一张）
+http://192.168.10.50:8888/stream          MJPEG 连续流
+http://192.168.10.50:8888/snapshot.jpg    单张 JPEG
+```
+
+说明：
+
+- 推流时摄像头切到 MJPG，**本地 LCD 预览会暂停**，浏览器断开后自动恢复；
+- 网页的“拍一张”只把图发给浏览器，**不写 `images/`**；存卡还是用触摸或 `SIGUSR1`；
+- iOS Safari 不支持 MJPEG 流，只能看 `/snapshot.jpg`；
+- 实测延迟：800×600 约 311 ms，640×480 约 276 ms。
+
 ---
 
 ## 日志
@@ -669,7 +723,7 @@ p lcd_var_screeninfo_t
 
 - 远程调试不使用 `r`，用 `c`；
 - 程序退出后 gdbserver 结束；
-- 当前板子没有 IP，通过 ADB 转发。
+- gdb 仍走 ADB 转发；板子现在有 `192.168.10.50`，HTTP 直接访问。
 
 ---
 
@@ -685,7 +739,11 @@ p lcd_var_screeninfo_t
 8. `app_config_t` 同时包含 camera/lcd/log/trans，偏大；
 9. `lcd_init()` 会把日志重定向到 `lcd.log`，`lcd_deinit()` 会关闭日志；
 10. 切到 800×600 固定要 1.7 s；首帧延迟约 1–1.6 s；
-11. 没有缩放、没有网络、没有单元测试/CI。
+11. 网页推流时本地 LCD 预览暂停（摄像头只能一种格式）；
+12. 网页的“拍一张”只回图给浏览器，不写 `images/`；
+13. 单客户端、无鉴权、无 HTTPS；
+14. iOS Safari 不支持 MJPEG 流，只能看单张；
+15. 没有缩放、没有单元测试/CI。
 
 ---
 
@@ -714,7 +772,7 @@ p lcd_var_screeninfo_t
 - [x] 640×480@30 验证
 - [x] letterbox 居中
 
-### v1.0（当前）
+### v1.0（已完成）
 
 - [x] 多分辨率（800×600 / 640×480 / 352×288）
 - [x] letterbox
@@ -723,16 +781,21 @@ p lcd_var_screeninfo_t
 - [x] OSD（分辨率 / 帧率 / 丢帧）
 - [x] 8 小时稳定（610390 帧，0 错误，RSS/fd 不增长）
 
-### v1.5（下一步）
+### v1.5（已完成）
 
-- [ ] MJPEG over HTTP
-- [ ] 手机/浏览器直接看
-- [ ] 单客户端先跑通，再考虑多客户端
+- [x] MJPEG over HTTP（`/stream`）
+- [x] 单张 JPEG（`/snapshot.jpg`）和首页（`/`）
+- [x] 空连接处理（300ms 超时）
+- [x] 延迟实测：800×600 约 311 ms，640×480 约 276 ms
+- [x] 开关标签页 10 次稳定
+- [x] 1 小时推流：RSS/fd 不增长，dropped 8/26856
 
 ### v2.0
 
 - [ ] 分层重构（camera/display/osd 从测试程序里抽出来）
 - [ ] 单元测试
+- [ ] 多客户端 / 鉴权 / HTTPS
+- [ ] 本地预览 + 网页推流同时（先测 libjpeg-turbo 编解码开销）
 - [ ] Buildroot 精简镜像、开机自启、看门狗
 - [ ] 内核/驱动方向：字符设备、I2C/Input、V4L2 驱动
 
@@ -740,13 +803,15 @@ p lcd_var_screeninfo_t
 
 ## 版本
 
-当前 `v1.0`：
+当前 `v1.5`：
 
-- 能演示：实时预览（800×600@15 / 640×480@30）、letterbox 居中、触摸拍照、分辨率轮换、OSD；
-- 不能做：缩放、网络推流、开机自启；
+- 能演示：LCD 实时预览、触摸拍照、分辨率轮换、OSD；浏览器打开 `http://板子IP:8888/`
+  就能看连续画面、点“拍一张”；
+- 不能做：本地预览和网页推流同时、多客户端、缩放、开机自启；
 - 已知问题：见上面「已知限制」；
 - 构建/运行：见「构建」「运行」两节；
-- 长跑数据：见 `docs/performance.md` 的 2026-11-14 一节。
+- 数据：8 小时长跑见 `docs/performance.md` 的 2026-11-14 一节，
+  网页延迟和 1 小时推流见 2026-11-20 一节。
 
 ---
 
