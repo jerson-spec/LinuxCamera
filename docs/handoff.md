@@ -142,6 +142,13 @@ LinuxCamera/
 │   ├── touch.c
 │   ├── yuyv.c
 │   └── main.c
+├── driver/                    # W8–W9 内核模块，不参与 CMake
+│   ├── README.md
+│   └── hello_misc/
+│       ├── hello_misc.c
+│       ├── Makefile
+│       ├── README.md
+│       └── test_hello.c
 ├── tests/
 │   ├── manual/
 │   │   ├── test_Get_images.c
@@ -167,7 +174,7 @@ LinuxCamera/
 │   ├── deploy.sh
 │   ├── deploy_dbg.sh
 │   ├── gdb.sh
-|	├──	setup_env.sh
+│   ├── setup_env.sh
 │   ├── soak_test.sh
 │   ├── mon.sh
 │   └── clock.html
@@ -703,7 +710,7 @@ v1.5 已完成，下面只写还没做的。
 - [ ] 拆 `app_config_t`，给 http/touch/osd 加配置；
 - [ ] 单元测试：`yuyv_to_rgb`、config 解析可以脱离硬件测；
 - [ ] 多客户端 / 鉴权 / HTTPS；
-- [ ] 本地预览 + 网页推流同时（先测 libjpeg-turbo 编解码开销）；
+- [ ] 多线程双端演示：LCD 预览 + 网页推流同时（先测 libjpeg-turbo 编解码；见 roadmap 第 10 节）；
 - [ ] Buildroot 精简镜像；
 - [ ] 开机自启 + 看门狗；
 - [ ] 驱动方向：字符设备 → poll/等待队列 → input → I2C/regmap → V4L2/UVC 内核代码。

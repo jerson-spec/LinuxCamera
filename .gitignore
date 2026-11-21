@@ -8,3 +8,13 @@ soak/
 *.yuyv
 *.yuv
 *.raw
+
+# kernel module build artifacts
+*.ko
+*.mod
+*.mod.c
+*.o
+.tmp_versions/
+modules.order
+Module.markers
+Module.symvers

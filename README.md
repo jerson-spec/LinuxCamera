@@ -249,6 +249,13 @@ LinuxCamera/
 │   ├── touch.c
 │   ├── yuyv.c
 │   └── main.c
+├── driver/                    # W8–W9 内核模块，不参与 CMake
+│   ├── README.md
+│   └── hello_misc/
+│       ├── hello_misc.c
+│       ├── Makefile
+│       ├── README.md
+│       └── test_hello.c
 ├── tests/
 │   ├── manual/
 │   │   ├── test_Get_images.c
@@ -274,7 +281,7 @@ LinuxCamera/
 │   ├── deploy.sh
 │   ├── deploy_dbg.sh
 │   ├── gdb.sh
-|	├──	setup_env.sh
+│   ├── setup_env.sh
 │   ├── soak_test.sh
 │   ├── mon.sh
 │   └── clock.html
