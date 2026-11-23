@@ -1,9 +1,9 @@
 # 架构说明
 
-> 当前状态：**v1.5**（预览 + 触摸 + OSD + 拍照 + 8h 长跑 + HTTP 单张/MJPEG 推流）。
+> 当前状态：**v1.5 + W8–W9 驱动进行中**（预览/触摸/OSD/拍照/HTTP + 自写字符设备、platform/input 按键）。
 >
 > 本文描述当前真实代码结构，不描述理想中的最终架构。
-> 新会话请先读 `docs/handoff.md`，再读本文。
+> 新会话请先读 `docs/handoff.md`，再读本文；驱动细节看 `docs/driver.md`。
 
 ---
 
@@ -27,10 +27,12 @@ V4L2 采集 → YUYV 转换 → LCD 显示 → 拍照/存卡 → 网络推流
 拍照：camera_stop → S_FMT(MJPG) → start → 取一帧 → 写 .jpg → 切回 YUYV
 分辨率：800×600 / 640×480 / 352×288 轮换，letterbox 居中
 网络：浏览器 GET / → HTML；/snapshot.jpg → 单张；/stream → multipart MJPEG
+按键：KEY1 → KEY_F1 → 拍照；KEY2 → KEY_F2 → 切分辨率（driver/button_plat）
 ```
 
 ```text
-v1.5：预览 + 触摸 + 拍照 + 切分辨率 + OSD + 8h 长跑 + 网页推流
+v1.5：预览 + 触摸 + 按键 + 拍照 + 切分辨率 + OSD + 8h 长跑 + 网页推流
+W8–W9：hello_misc（字符设备/poll） + button_plat（platform/input） → I2C 未做
 ```
 
 ---
@@ -346,16 +348,28 @@ void camera_close(camera_t *cam);
   - `/stream` → 切一次 MJPG，循环 `DQBUF → send 分片 → QBUF`，退出恢复 YUYV；
 - 客户端连接先 `poll(300ms)`，浏览器预连接不发请求就直接关掉，避免堵住主循环。
 
-### 5.9 `tests/manual`
+### 5.9 `driver`
+
+`driver/` 是 W8–W9 的内核模块，和用户态 CMake 完全分开：
+
+- `hello_misc/`：misc 字符设备，read/write/ioctl/poll + 等待队列；
+- `button_plat/`：platform 驱动 + input 子系统，设备树匹配 `linuxcamera,button`；
+  - `button-gpios` 第 0 个 → `KEY_F1`（拍照），第 1 个 → `KEY_F2`（切分辨率）；
+  - input 设备名 `lc-button`，应用按名字找；
+  - 设备树补丁在 `driver/button_plat/lc_button.patch`。
+
+应用侧只从 `/dev/input/eventX` 读 `input_event`，不关心 GPIO/中断细节。
+
+### 5.10 `tests/manual`
 
 | 程序 | 作用 |
 |---|---|
 | `test_Get_images.c` | V4L2 采集/枚举/保存 JPEG |
 | `test_Draw_region.c` | LCD 参数打印 + 绘制区域 |
 | `test_Trans_YUYV.c` | 合成 YUYV 色条 → RGB → LCD |
-| `test_camera_preview.c` | v1.5 主程序：预览 + 触摸 + 拍照 + OSD + HTTP |
+| `test_camera_preview.c` | v1.5 主程序：预览 + 触摸 + 按键 + 拍照 + OSD + HTTP |
 
-### 5.10 构建目标
+### 5.11 构建目标
 
 ```text
 camera_core          # config.c + log.c + lcd.c + yuyv.c + camera.c + osd.c + touch.c + http.c
@@ -368,6 +382,7 @@ config_test          # 配置测试
 ```
 
 `camera_core` 目前包含 Linux 专用的 `lcd.c` / `camera.c` / `touch.c` / `http.c`，所以整体是 Linux-only。
+`driver/` 不参与 CMake，用各自的 Makefile 编内核模块。
 
 ---
 
@@ -389,15 +404,17 @@ config_test          # 配置测试
 
 按优先级：
 
-1. `test_camera_preview.c` 700 行，采集/显示/触摸/OSD/拍照/切分辨率都在里面；
+1. `test_camera_preview.c` 约 900 行，采集/显示/触摸/按键/OSD/拍照/切分辨率都在里面；
 2. `yuyv_to_rgb()` 没有 stride 参数；
 3. `yuyv.c` 全局 `full` 状态；
 4. `lcd.c` 全局状态；`lcd_init()` 重置日志、`lcd_deinit()` 关闭日志；
 5. `app_config_t` 过大，touch/OSD/http 还没有配置项；
 6. 配置路径分散，`lcd_init()` 会重复 load `lcd.ini`；
 7. 首帧延迟 1–1.6 s；切到 800×600 固定 1.7 s；
-8. HTTP 单客户端、阻塞式；推流期间触摸不响应；
-9. 没有单元测试/CI；
+8. HTTP 单客户端、阻塞式；推流期间触摸/按键不响应；
+9. 按键驱动假设 `button-gpios` 正好两个 GPIO；`gpio-keys` 必须 disabled；
+10. 主循环里还有一条 `poll revents mismatch` 的 WARN，是噪音；
+11. 没有单元测试/CI；
 
 ---
 
@@ -414,14 +431,16 @@ config_test          # 配置测试
 - 推流切一次 MJPG，循环取帧发送，退出恢复 YUYV；
 - 300ms 空连接超时；1 小时推流 RSS/fd 不涨。
 
-### 下一步：W8–W9 驱动
+### W8–W9 进行中
 
-- 字符设备 → poll/等待队列 → input → I2C/regmap；
+- 已完成：`hello_misc`（字符设备/poll/等待队列）、`button_plat`（platform/input）；
+- 设备树补丁；应用按键接入；
+- 下一步：I2C 光感（先确认硬件）、背光/亮度；
 - 有余力再看 UVC/V4L2 内核代码。
 
 ### v2.0 前要做的重构
 
-- `test_camera_preview.c` 已经 800 行，把主循环拆到 `src/app.c`；
+- `test_camera_preview.c` 已经 900 行，把主循环拆到 `src/app.c`；
 - 显示部分抽到 `src/display.c`；
 - `src/main.c` 只负责参数解析和编排；
 - 日志只在 main 初始化一次，`lcd.c` 不再碰日志；

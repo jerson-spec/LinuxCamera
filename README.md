@@ -2,7 +2,7 @@
 
 基于 i.MX6ULL + Linux V4L2 的相机项目。
 
-> **当前状态：v1.5（能联网看）**
+> **当前状态：v1.5（能联网看）+ W8–W9 驱动进行中**
 >
 > 已实现：
 > - V4L2 MMAP 采集、格式/分辨率枚举、MJPEG 保存 JPEG
@@ -16,12 +16,14 @@
 > - 8 小时长跑：610390 帧、0 错误、内存和 fd 都不增长（v1.0）
 > - **HTTP：`/` 首页、`/snapshot.jpg` 单张、`/stream` MJPEG 连续流（v1.5）**
 > - **1 小时网页推流：RSS/fd 不增长，延迟约 280–310 ms（v1.5）**
+> - **自写内核驱动：`hello_misc`（字符设备/poll）、`button_plat`（platform + input，按键拍照/切分辨率）（W8–W9）**
 >
 > 尚未实现：
 > - 缩放（放大/缩小）
 > - 本地预览和网页推流同时进行（摄像头同一时刻只能一种格式）
 > - 多客户端、鉴权、HTTPS（v2.0）
 > - 开机自启 / 看门狗 / Buildroot 精简（v2.0）
+> - I2C 光感/自动亮度（硬件待确认）
 >
 
 ---
@@ -73,6 +75,10 @@
 | `/snapshot.jpg` 单张 | ✅ v1.5 已验证 |
 | `/stream` MJPEG 连续流 | ✅ v1.5（Android Chrome；iOS Safari 不支持） |
 | 网页推流 1 小时 | ✅ RSS/fd 不增长，延迟约 300 ms |
+| 字符设备 `hello_misc`（read/write/ioctl/poll） | ✅ W8–W9 已验证 |
+| platform + input 按键驱动 `button_plat` | ✅ W8–W9 已验证 |
+| 按键拍照（KEY1）/ 切分辨率（KEY2） | ✅ 已验证 |
+| I2C 光感 / 自动亮度 | ❌ 硬件待确认 |
 | 缩放（放大/缩小） | ❌ 未实现 |
 | 本地预览 + 网页推流同时 | ❌ 摄像头同一时刻只能一种格式 |
 | 多客户端 / 鉴权 / HTTPS | ❌ v2.0 |
@@ -251,11 +257,15 @@ LinuxCamera/
 │   └── main.c
 ├── driver/                    # W8–W9 内核模块，不参与 CMake
 │   ├── README.md
-│   └── hello_misc/
-│       ├── hello_misc.c
+│   ├── hello_misc/
+│   │   ├── hello_misc.c
+│   │   ├── Makefile
+│   │   ├── README.md
+│   │   └── test_hello.c
+│   └── button_plat/
+│       ├── button_plat.c
 │       ├── Makefile
-│       ├── README.md
-│       └── test_hello.c
+│       └── lc_button.patch
 ├── tests/
 │   ├── manual/
 │   │   ├── test_Get_images.c
@@ -269,8 +279,10 @@ LinuxCamera/
 ├── docs/
 │   ├── architecture.md
 │   ├── board.md
+│   ├── driver.md
 │   ├── roadmap.md
 │   ├── handoff.md
+│   ├── handoff-prompt.md
 │   ├── release-v1.0.md
 │   ├── release-v1.5.md
 │   ├── debug-log.md
@@ -750,7 +762,10 @@ p lcd_var_screeninfo_t
 12. 网页的“拍一张”只回图给浏览器，不写 `images/`；
 13. 单客户端、无鉴权、无 HTTPS；
 14. iOS Safari 不支持 MJPEG 流，只能看单张；
-15. 没有缩放、没有单元测试/CI。
+15. 按键驱动假设 `button-gpios` 正好两个 GPIO；`gpio-keys` 必须 disabled；
+16. 改完内核模块必须 `rmmod` 再 `insmod`，否则跑的是旧 `.ko`；
+17. 主循环里还有一条 `poll revents mismatch` 的 WARN，是按键/触摸唤醒 poll 时的噪音；
+18. 没有缩放、没有单元测试/CI；I2C 光感硬件待确认。
 
 ---
 
@@ -788,7 +803,7 @@ p lcd_var_screeninfo_t
 - [x] OSD（分辨率 / 帧率 / 丢帧）
 - [x] 8 小时稳定（610390 帧，0 错误，RSS/fd 不增长）
 
-### v1.5（已完成）
+### v1.5（已完成，tag `v1.5`）
 
 - [x] MJPEG over HTTP（`/stream`）
 - [x] 单张 JPEG（`/snapshot.jpg`）和首页（`/`）
@@ -797,6 +812,16 @@ p lcd_var_screeninfo_t
 - [x] 开关标签页 10 次稳定
 - [x] 1 小时推流：RSS/fd 不增长，dropped 8/26856
 
+### W8–W9 驱动（进行中）
+
+- [x] `hello_misc`：misc 字符设备 + read/write/ioctl/poll/等待队列
+- [x] `button_plat`：platform + input，KEY1=KEY_F1 拍照、KEY2=KEY_F2 切分辨率
+- [x] 设备树补丁 `driver/button_plat/lc_button.patch`
+- [x] 应用按名字找 `lc-button`，按键已接入主循环
+- [ ] I2C 光感（先 `i2cdetect` 确认硬件）
+- [ ] 背光/自动亮度（`/sys/class/backlight`）
+- [ ] 更深的 input/I2C 练习（按产品需要）
+
 ### v2.0
 
 - [ ] 分层重构（camera/display/osd 从测试程序里抽出来）
@@ -804,21 +829,23 @@ p lcd_var_screeninfo_t
 - [ ] 多客户端 / 鉴权 / HTTPS
 - [ ] 本地预览 + 网页推流同时（先测 libjpeg-turbo 编解码开销）
 - [ ] Buildroot 精简镜像、开机自启、看门狗
-- [ ] 内核/驱动方向：字符设备、I2C/Input、V4L2 驱动
+- [ ] 内核/驱动方向：I2C/regmap、V4L2 深入
 
 ---
 
 ## 版本
 
-当前 `v1.5`：
+当前 `v1.5`（已打标签），W8–W9 驱动进行中：
 
-- 能演示：LCD 实时预览、触摸拍照、分辨率轮换、OSD；浏览器打开 `http://板子IP:8888/`
-  就能看连续画面、点“拍一张”；
+- 能演示：LCD 实时预览、触摸/按键拍照、分辨率轮换、OSD；浏览器打开
+  `http://板子IP:8888/` 看连续画面、点“拍一张”；
+- 能演示：自写 `hello_misc` 字符设备和 `button_plat` platform/input 按键驱动；
 - 不能做：本地预览和网页推流同时、多客户端、缩放、开机自启；
 - 已知问题：见上面「已知限制」；
 - 构建/运行：见「构建」「运行」两节；
 - 数据：8 小时长跑见 `docs/performance.md` 的 2026-11-14 一节，
-  网页延迟和 1 小时推流见 2026-11-20 一节。
+  网页延迟和 1 小时推流见 2026-11-20 一节；
+- 驱动细节：见 `docs/driver.md`。
 
 ---
 

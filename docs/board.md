@@ -3,7 +3,7 @@
 > 本文记录当前开发板、设备节点、网络、工具链、构建、部署和调试方式。
 > 如果换了板子、SDK 或摄像头，先更新本文。
 >
-> 当前阶段：v1.5（网页推流 1 小时通过）。
+> 当前阶段：v1.5（网页推流 1 小时通过），W8–W9 驱动进行中。
 
 ---
 
@@ -19,7 +19,10 @@
 | 摄像头实际输出 | **800×600 YUYV**（驱动调整；640×480 可跑 30fps） |
 | 摄像头 `bytesperline` | **1600 = 800 × 2**（640×480 时 1280） |
 | LCD | `/dev/fb0`，**1024×600，32bpp** |
-| 触摸 | `/dev/input/event1` |
+| 触摸 | `goodix-ts`，`/dev/input/event1` |
+| 按键 | KEY1=GPIO5_IO01→`KEY_F1`；KEY2=GPIO4_IO14→`KEY_F2`，低有效 |
+| 背光 | `pwm-backlight`（pwm1，0–10 级），`/sys/class/backlight` |
+| 光感 | memo 说有 I2C 光感，但 DTS 的 `&i2c1` 为空，**未确认** |
 | 显示结果 | letterbox 居中，左右各 112 像素黑色 |
 | 主机 | Windows + VMware/Ubuntu 虚拟机 |
 | 连接方式 | USB 转网口直连 + 串口（USB-TTL）+ ADB |
@@ -105,6 +108,56 @@ ping 192.168.10.50
 直连的副作用：板子关机时 USB 网卡会 `NO-CARRIER`，VM 的桥接网卡跟着断；
 这是正常的物理层行为，不是配置错误。
 
+### 1.2 按键与内核模块
+
+两个按键都是低有效：
+
+| 按键 | GPIO | 键码 | 功能 |
+|---|---|---|---|
+| KEY1 | GPIO5_IO01 | `KEY_F1` | 拍照 |
+| KEY2 | GPIO4_IO14 | `KEY_F2` | 切分辨率 |
+
+驱动在 `driver/button_plat/`，设备树补丁 `lc_button.patch`。板子上
+`gpio-keys` 必须 `disabled`，否则会抢 GPIO。
+
+编译 / 加载：
+
+```bash
+cd driver/button_plat
+make
+adb push button_plat.ko /root/
+adb shell rmmod button_plat 2>/dev/null
+adb shell insmod /root/button_plat.ko
+adb shell dmesg | tail
+```
+
+应该看到两行：
+
+```text
+button: 0 irq=... key=59
+button: 1 irq=... key=60
+```
+
+只有一行说明跑的是旧单键 `.ko`，先 `rmmod` 再 `insmod` 新编的。
+
+板子上没有 `evtest`，看按键事件用：
+
+```bash
+dmesg -c >/dev/null
+# 按 KEY1/KEY2
+dmesg | tail -20
+# evbug 会打印 Code/Value
+```
+
+或者 `hexdump -C /dev/input/eventX`。
+
+### 1.3 背光 / 光感
+
+- 背光：DTS 有 `pwm-backlight`（pwm1，0–10 级），先确认
+  `/sys/class/backlight/backlight/brightness` 是否存在；
+- 光感：memo 说 I2C，但当前 `&i2c1` 为空，先 `i2cdetect -y 1` 确认硬件，
+  没有就不要硬写驱动。
+
 ---
 
 ## 2. 设备节点
@@ -177,6 +230,21 @@ cat /sys/class/graphics/fb0/virtual_size
 `-EPERM`（内核 `fb_pan_display()` 在非 RUNNING 状态直接拒绝），日志里会出现交替的
 `yoffset: 0 / 600` 错误——这是**预期现象**，也正好证明 flip 在每帧切换。
 `echo 0 > blank` 恢复后，建议重启程序。
+
+### 2.3 输入设备
+
+当前板子上通常有：
+
+| 节点 | 设备 | 用途 |
+|---|---|---|
+| `/dev/input/event0` | `snvs-powerkey` | 电源键，不用 |
+| `/dev/input/event1` | `goodix-ts` | 触摸屏 |
+| `/dev/input/event2` | USB 2.0 Camera | 摄像头自带按键（`KEY_CAMERA`），不用 |
+| `/dev/input/event3` | `lc-button` | 我们的按键驱动，`insmod` 后才出现 |
+
+`event` 编号会随加载顺序变化，应用里**不要写死**，用
+`/sys/class/input/event*/device/name` 按名字找。触摸找 `goodix-ts`，按键找
+`lc-button`。
 
 ---
 
@@ -470,6 +538,11 @@ p lcd_var_screeninfo_t
 - `lcd_write_line_rgb888()` 只支持 32bpp；
 - 推流时本地预览暂停；网页“拍一张”不落盘；iOS Safari 不支持 MJPEG 流；
 - 没有缩放、没有多客户端/鉴权/HTTPS；
+- 按键驱动假设 `button-gpios` 正好两个 GPIO；`gpio-keys` 必须 disabled；
+- 改完内核模块必须 `rmmod` 再 `insmod`，否则跑旧 `.ko`；
+- 板子上没有 `evtest`，用 `dmesg` 的 evbug 或 `hexdump`；
+- 主循环里还有 `poll revents mismatch` 的 WARN，是噪音；
+- I2C 光感硬件未确认，背光节点待确认；
 - 切到 800×600 固定 1.7 s，首帧延迟 1–1.6 s；
 - 温度长跑稳定在 68–71℃。
 

@@ -45,7 +45,8 @@ static irqreturn_t button_irq(int irq, void *data)
 
     b->last_jiffies = jiffies;
     b->last_state = pressed;
-	
+
+	/* 上报输入事件 */
 	/** input_event(dev, EV_KEY, code, !!value) **/
     input_report_key(b->input, b->keycode, pressed);
 

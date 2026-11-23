@@ -8,8 +8,11 @@ W8–W9 的内核模块练习，和用户态的 `src/`、`tests/` 分开，不�
   用来练 `file_operations`、`copy_to/from_user`、等待队列和 `poll_wait`。
 - `button_plat/`：platform + input 按键驱动，设备树匹配 `linuxcamera,button`，
   中断里用 `input_report_key()` 上报，用户态从 `/dev/input/eventX` 读。
+  设备树补丁在 `button_plat/lc_button.patch`。
 
-以后每学一个驱动就加一个目录，比如 `button_input/`、`i2c_sensor/`，
+更完整的驱动记录（DTS、按键、I2C 计划、踩坑）见 `docs/driver.md`。
+
+以后每学一个驱动就加一个目录，比如 `i2c_sensor/`，
 每个目录自带 Makefile、测试程序和 README。
 
 ## 编译
@@ -20,9 +23,12 @@ W8–W9 的内核模块练习，和用户态的 `src/`、`tests/` 分开，不�
 ```bash
 cd driver/hello_misc
 make
+
+cd ../button_plat
+make
 ```
 
-会生成 `hello_misc.ko` 和交叉编译的 `test_hello`。
+会生成 `hello_misc.ko` / `test_hello`、`button_plat.ko`。
 如果工具链不在 PATH 里：
 
 ```bash
@@ -32,13 +38,15 @@ make CROSS_COMPILE=/path/to/bin/arm-buildroot-linux-gnueabihf-
 ## 上板
 
 ```bash
-adb push hello_misc.ko test_hello /root/
+adb push hello_misc.ko test_hello button_plat.ko /root/
 adb shell
 insmod /root/hello_misc.ko
 chmod 666 /dev/hello_misc
 dmesg | tail
-/root/test_hello
-rmmod hello_misc
+
+rmmod button_plat 2>/dev/null
+insmod /root/button_plat.ko
+dmesg | tail
 ```
 
 具体接口和测试步骤见各模块目录下的 README。
