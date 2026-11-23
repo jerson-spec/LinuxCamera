@@ -17,6 +17,8 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <time.h>
+#include <dirent.h>
+#include <linux/input.h>
 
 #include "config.h"
 #include "lcd.h"
@@ -332,6 +334,71 @@ static int snapshot_mjpeg(camera_t *cam,const app_config_t *cfg,const char *path
 }
 
 /*
+ * 修改：按名字找 /dev/input/eventX。
+ * 不写死 event1/event0，避免加了按键驱动之后编号变化。
+ * 返回 event 号（0、1、2...），找不到返回 -1。
+ */
+static int input_find_event(const char *name)
+{
+	DIR *d = opendir("/sys/class/input");
+	struct dirent *de;
+	char path[128];
+	char buf[128];
+	int fd, n;
+
+	if (d == NULL)
+		return -1;
+
+	while ((de = readdir(d)) != NULL) {
+		if (strncmp(de->d_name, "event", 5) != 0)
+			continue;
+
+		snprintf(path, sizeof(path),
+		         "/sys/class/input/%s/device/name", de->d_name);
+
+		fd = open(path, O_RDONLY);
+		if (fd < 0)
+			continue;
+
+		n = read(fd, buf, sizeof(buf) - 1);
+		close(fd);
+		if (n <= 0)
+			continue;
+
+		buf[n] = '\0';
+		buf[strcspn(buf, "\n")] = '\0';
+
+		if (strcmp(buf, name) == 0) {
+			int ev = atoi(de->d_name + 5);
+			closedir(d);
+			return ev;
+		}
+	}
+
+	closedir(d);
+	return -1;
+}
+
+/*
+ * 修改：处理按键事件。
+ * 只处理 EV_KEY 的按下（value=1），抬起忽略。
+ */
+static void handle_buttons(int fd)
+{
+	struct input_event ev;
+
+	while (read(fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
+		if (ev.type != EV_KEY || ev.value != 1)
+			continue;
+
+		if (ev.code == KEY_CAMERA || ev.code == KEY_F1 || ev.code == KEY_1)
+			g_save = 1;
+		else if (ev.code == KEY_F2 || ev.code == KEY_2)
+			g_res = 1;
+	}
+}
+
+/*
  *	./test_camera_preview [path/camera.ini] [path/lcd.ini]
  */
 int main(int argc, char **argv)
@@ -459,10 +526,18 @@ int main(int argc, char **argv)
 
 	/* 5. 触摸屏 */
 	touch_t tch;
-	
-	/** 触摸屏设备系event1，事先在板子上手动确认 **/
-	if(touch_open(&tch, "/dev/input/event1") < 0){
-		LOG_WARN("touch open failed");
+	int touch_ev;
+	char touch_dev[32];
+
+	/* 修改：按名字找 goodix-ts，找不到再退回 event1 */
+	touch_ev = input_find_event("goodix-ts");
+	if (touch_ev >= 0)
+		snprintf(touch_dev, sizeof(touch_dev), "/dev/input/event%d", touch_ev);
+	else
+		snprintf(touch_dev, sizeof(touch_dev), "/dev/input/event1");
+
+	if(touch_open(&tch, touch_dev) < 0){
+		LOG_WARN("touch open %s failed", touch_dev);
 	}
 	else{
 		tch_ok = 1;
@@ -523,13 +598,17 @@ int main(int argc, char **argv)
 	}
 	
 	/*
-	 * poll 三个来源：摄像头、触摸、HTTP 监听。
-	 * 触摸/HTTP 是可选的，所以用 idx 记录它们在数组里的位置。
+	 * poll 四个来源：摄像头、触摸、HTTP 监听、按键。
+	 * 后三个都是可选的，所以用 idx 记录它们在数组里的位置。
 	 */
-	struct pollfd fds[3];
+	struct pollfd fds[4];
 	int nfds = 0;
 	int touch_idx = -1;
 	int http_idx = -1;
+	int key_idx = -1;
+	int key_fd = -1;
+	int key_ev;
+	char key_dev[32];
 
 	fds[nfds].fd = cam.fd;      fds[nfds].events = POLLIN;  nfds++;
 	if (tch_ok) {
@@ -539,6 +618,24 @@ int main(int argc, char **argv)
 	if (http_ok) {
 		http_idx = nfds;
 		fds[nfds].fd = http_fd; fds[nfds].events = POLLIN;  nfds++;
+	}
+
+	/* 修改：按名字打开自己的 lc-button 驱动注册的 input 设备 */
+	key_ev = input_find_event("lc-button");
+	if (key_ev >= 0) {
+		snprintf(key_dev, sizeof(key_dev), "/dev/input/event%d", key_ev);
+		key_fd = open(key_dev, O_RDONLY | O_NONBLOCK);
+		if (key_fd >= 0) {
+			key_idx = nfds;
+			fds[nfds].fd = key_fd;
+			fds[nfds].events = POLLIN;
+			nfds++;
+			LOG_INFO("button: %s", key_dev);
+		} else {
+			LOG_WARN("open %s failed: %s", key_dev, strerror(errno));
+		}
+	} else {
+		LOG_WARN("lc-button not found");
 	}
 
 	last_t0 = get_time_ms();
@@ -580,6 +677,10 @@ int main(int argc, char **argv)
 			}
 		}		
 
+		/* 修改：按键按下 -> 拍照/切分辨率 */
+		if (key_idx >= 0 && (fds[key_idx].revents & POLLIN))
+			handle_buttons(key_fd);
+
 		/*
 		 * 修改：HTTP 只留一个入口。
 		 * http_accept 拿到连接 fd 后交给 http_serve，
@@ -607,7 +708,7 @@ int main(int argc, char **argv)
 				exit_code = -3;
 				break;
 			}
-			LOG_WARN("poll revents mismatch: %hd", fds[0].revents);
+			//LOG_WARN("poll revents mismatch: %hd", fds[0].revents);
 			continue;
 		}
 		
@@ -786,6 +887,8 @@ cleanup:
 		camera_close(&cam);
 	if (http_ok)
 		http_close(http_fd);
+	if (key_fd >= 0)
+		close(key_fd);
 	free(rgbbuf);
 	if (lcd_ok)
 		lcd_deinit();

@@ -36,7 +36,7 @@ static ssize_t hello_read(struct file *file, char __user *ubuf,
 		  return -EAGAIN;
 	  
 		/* 等待队列唤醒 */
-	  if (wait_event_interruptible(hello_wait, hello_len > 0))
+	  if (wait_event_interruptible(hello_wait, hello_len > *ppos))
 		  return -ERESTARTSYS;
   }
 
@@ -99,7 +99,7 @@ static unsigned int hello_poll(struct file *file,
 	/* 当前进程挂到等待队列 */
     poll_wait(file, &hello_wait, wait);
 
-    if (hello_len > 0)
+    if (hello_len > file->f_pos)
         mask |= POLLIN | POLLRDNORM;
 
     return mask;

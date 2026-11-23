@@ -6,6 +6,8 @@ W8–W9 的内核模块练习，和用户态的 `src/`、`tests/` 分开，不�
 
 - `hello_misc/`：misc 字符设备，支持 read/write/ioctl/poll。
   用来练 `file_operations`、`copy_to/from_user`、等待队列和 `poll_wait`。
+- `button_plat/`：platform + input 按键驱动，设备树匹配 `linuxcamera,button`，
+  中断里用 `input_report_key()` 上报，用户态从 `/dev/input/eventX` 读。
 
 以后每学一个驱动就加一个目录，比如 `button_input/`、`i2c_sensor/`，
 每个目录自带 Makefile、测试程序和 README。

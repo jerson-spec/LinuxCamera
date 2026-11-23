@@ -2,6 +2,7 @@ build*/
 stage/
 
 # 运行产物
+log_hub/
 *.log
 images/
 soak/
@@ -18,3 +19,11 @@ soak/
 modules.order
 Module.markers
 Module.symvers
+
+# idea / goal
+linuxcamera_memo.md
+
+# 设备树
+*.dts
+*.dtb
+*.dtsi
