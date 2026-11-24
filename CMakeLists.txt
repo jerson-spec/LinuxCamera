@@ -28,6 +28,7 @@ add_library(camera_core STATIC
     src/touch.c
     src/http.c
     src/backlight.c   # 修改：背光
+    src/lux.c         # 修改：光感
 )
 target_include_directories(camera_core PUBLIC
     include
@@ -106,6 +107,17 @@ add_executable(config_test
     tests/unit/config_test.c
 )
 target_link_libraries(config_test PRIVATE
+    camera_core
+)
+
+# --------- 光感直读的小测试 -----------
+add_executable(test_lux
+    tests/manual/test_lux.c
+)
+target_compile_options(test_lux PRIVATE
+    -Wall -Wextra
+)
+target_link_libraries(test_lux PRIVATE
     camera_core
 )
 
