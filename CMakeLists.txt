@@ -27,6 +27,7 @@ add_library(camera_core STATIC
     src/osd.c
     src/touch.c
     src/http.c
+    src/backlight.c   # 修改：背光
 )
 target_include_directories(camera_core PUBLIC
     include
