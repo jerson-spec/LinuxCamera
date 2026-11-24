@@ -29,10 +29,13 @@
 #include "touch.h"
 #include "http.h"
 #include "snapshot.h"
+#include "backlight.h"	/* 修改：背光模块 */
 
 static volatile sig_atomic_t g_stop = 0;
 static volatile sig_atomic_t g_save = 0;
 static volatile sig_atomic_t g_res = 0;
+/* 修改：上下滑的亮度增减，+1 加一档，-1 减一档 */
+static volatile sig_atomic_t g_bright = 0;
 
 typedef struct {
 	unsigned int width;
@@ -409,6 +412,7 @@ int main(int argc, char **argv)
 	int lcd_ok = 0;
 	int tch_ok = 0;
 	int http_ok = 0;
+	int bl_ok = 0;		/* 修改：背光是否打开成功 */
 	int http_fd = -1;
 	int poll_timeout_cnt = 0;
 
@@ -418,6 +422,7 @@ int main(int argc, char **argv)
 	struct tm tm;
 
 	camera_t cam;
+	backlight_t bl;		/* 修改：背光句柄 */
 	letterbox_t lb;
 	unsigned char *rgbbuf = NULL;
 	size_t size = 0;
@@ -441,6 +446,9 @@ int main(int argc, char **argv)
 
 	memset(&cam, 0, sizeof(cam));
 	cam.fd = -1;
+	/* 修改：背光先置成"没打开"，cleanup 里只看 bl_ok */
+	memset(&bl, 0, sizeof(bl));
+	bl.fd = -1;
 	memset(&camera_cfg, 0, sizeof(camera_cfg));
 	memset(&lcd_cfg, 0, sizeof(lcd_cfg));
 	memset(&lb, 0, sizeof(lb));
@@ -489,6 +497,16 @@ int main(int argc, char **argv)
 			LOG_ERROR("log_init %s failed: %s", camera_cfg.log_file, strerror(errno));
 		}
 	}
+
+	/*
+	 * 修改：3.5 背光。
+	 * 失败只告警不退出——采集和显示才是主功能，背光没有也能跑。
+	 * 放在日志重定向之后，这一行才会写进 camera.log。
+	 */
+	if (backlight_init(&bl, NULL, BACKLIGHT_DEFAULT_PERCENT) == 0)
+		bl_ok = 1;
+	else
+		LOG_WARN("backlight init failed, continue without it");
 
 	/* 4. 相机：打开、设格式、请求帧率 */
 	pixfmt = camera_pixfmt_from_string(camera_cfg.format);
@@ -669,11 +687,23 @@ int main(int argc, char **argv)
 			if (r < 0) {
 				LOG_WARN("touch read error");
 			} else if (r == 1) {
-				LOG_INFO("tap: %d,%d", tx, ty);
-				if (tx > (int)lcd_var_screeninfo.xres / 2)
-					g_res = 1;
-				else
-					g_save = 1;
+				/*
+				 * 修改：先看手势。
+				 * 上下滑只动亮度，不参与左右分区，所以不会误触发拍照。
+				 */
+				if (tch.gesture == TOUCH_GESTURE_SWIPE_UP) {
+					LOG_INFO("swipe up");
+					g_bright = 1;
+				} else if (tch.gesture == TOUCH_GESTURE_SWIPE_DOWN) {
+					LOG_INFO("swipe down");
+					g_bright = -1;
+				} else {
+					LOG_INFO("tap: %d,%d", tx, ty);
+					if (tx > (int)lcd_var_screeninfo.xres / 2)
+						g_res = 1;
+					else
+						g_save = 1;
+				}
 			}
 		}		
 
@@ -787,6 +817,18 @@ int main(int argc, char **argv)
 			wait_time = conv_time = draw_time = n = 0;
 		}
 		
+		/*
+		 * 修改：滑动调亮度。
+		 * 一次滑动走一档，写 sysfs 只要几微秒，不会拖慢这一帧。
+		 */
+		if (g_bright != 0) {
+			int delta = (int)g_bright;
+
+			g_bright = 0;
+			if (bl_ok && backlight_step(&bl, delta) == 0)
+				LOG_INFO("bright: %d%%", backlight_percent(&bl));
+		}
+
 		/* 拍照：触发源只是置标志，真正处理在循环里 */
 		if (g_save) {
 			int r;
@@ -856,11 +898,17 @@ int main(int argc, char **argv)
 		osd_show_text_shadow(lb.x_offset + 8, lb.y_offset + 8,
 		                     (const unsigned char *)line, 0x00FFFFFF, 0x00000000);
 
-		snprintf(line, sizeof(line), "fps: %.1f  drop: %u", fps, dropped);
+		/* 修改：第二行带上当前亮度，滑一下下一帧就能看到变化 */
+		if (bl_ok)
+			snprintf(line, sizeof(line), "fps: %.1f  drop: %u  bl: %d%%",
+			         fps, dropped, backlight_percent(&bl));
+		else
+			snprintf(line, sizeof(line), "fps: %.1f  drop: %u", fps, dropped);
 		osd_show_text_shadow(lb.x_offset + 8, lb.y_offset + 8 + 18,
 		                     (const unsigned char *)line, 0x00FFFFFF, 0x00000000);		
 
-		snprintf(line, sizeof(line), "tap left: shot / tap right: res");
+		/* 修改：把滑动的提示补上 */
+		snprintf(line, sizeof(line), "tap L: shot / tap R: res / swipe: bright");
 		osd_show_text_shadow(lb.x_offset + 8, lb.y_offset + 8 + 36,
 		                     (const unsigned char *)line, 0x00FFFFFF, 0x00000000);		
 		#else	//无阴影
@@ -890,6 +938,11 @@ cleanup:
 	if (key_fd >= 0)
 		close(key_fd);
 	free(rgbbuf);
+
+	/* 修改：背光要在 lcd_deinit 之前收，因为 lcd_deinit 会把日志关掉 */
+	if (bl_ok)
+		backlight_deinit(&bl);
+
 	if (lcd_ok)
 		lcd_deinit();
 	if(tch_ok)

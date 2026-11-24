@@ -96,6 +96,62 @@ void touch_set_range(touch_t *tch_p, int x_min, int x_max, int y_min, int y_max)
 	tch_p->y_max = y_max;
 }
 
+/*
+ *	修改：input_event 自带内核时间戳，直接拿来算手势时长，
+ *	不用再 clock_gettime 一次。
+ */
+static long long touch_event_ms(const struct input_event *ev)
+{
+	return (long long)ev->time.tv_sec * 1000LL +
+	       (long long)ev->time.tv_usec / 1000LL;
+}
+
+/*
+ *	修改：把一次触摸分成 点击 / 上滑 / 下滑。
+ *	- 位移、时长都用原始坐标和事件时间戳，避开 800x480 -> 1024x600 的映射；
+ *	- 阈值取 y 量程的 1/10（600 高约 60 像素），太小的位移仍算点击；
+ *	- 超过 600ms 才松手的不算滑动，避免慢慢拖动也触发亮度。
+ */
+#define TOUCH_SWIPE_MAX_MS  600
+
+static int touch_gesture_classify(const touch_t *tch_p, long long up_ms)
+{
+	long long dt;
+	int dx, dy, adx, ady, thr;
+
+	if (!tch_p->down_valid)
+		return TOUCH_GESTURE_TAP;
+
+	dx = tch_p->x_val - tch_p->down_x;
+	dy = tch_p->y_val - tch_p->down_y;
+	dt = up_ms - tch_p->down_ms;
+
+	adx = dx < 0 ? -dx : dx;
+	ady = dy < 0 ? -dy : dy;
+
+	thr = (tch_p->y_max - tch_p->y_min) / 10;
+	
+	/** 底线保护,防止抖动 **/
+	if (thr < 30)
+		thr = 30;
+
+	if (dt < 0 || dt > TOUCH_SWIPE_MAX_MS)
+		return TOUCH_GESTURE_TAP;
+
+	if (ady > thr && ady > adx) {
+		if (dy < 0)
+			return TOUCH_GESTURE_SWIPE_UP;
+		return TOUCH_GESTURE_SWIPE_DOWN;
+	}
+
+	return TOUCH_GESTURE_TAP;
+}
+
+/*
+ *	修改：返回 1 时顺带填 tch_p->gesture。
+ *	点击还是回原来的坐标给调用方分区用；上下滑也返回 1，
+ *	但手势字段是 SWIPE_UP / SWIPE_DOWN，调用方据此走亮度而不是拍照。
+ */
 int touch_read(touch_t *tch_p, int *x, int *y)
 {
 	struct input_event ev;
@@ -111,6 +167,9 @@ int touch_read(touch_t *tch_p, int *x, int *y)
 
 	/* 一次把队列里的事件全部消费掉，读到 EAGAIN 为止 */
 	while ((n = read(tch_p->fd, &ev, sizeof(ev))) == (ssize_t)sizeof(ev)) {
+		/* 修改：这一批事件的毫秒时间戳，手势判定要用 */
+		long long ev_ms = touch_event_ms(&ev);
+
 		if (ev.type == EV_ABS) {
 			if (ev.code == ABS_X || ev.code == ABS_MT_POSITION_X) {
 				tch_p->x_val = ev.value;
@@ -121,11 +180,29 @@ int touch_read(touch_t *tch_p, int *x, int *y)
 			}
 		} else if (ev.type == EV_KEY && ev.code == BTN_TOUCH) {
 			if (ev.value) {
+				/* 修改：按下先挂起，等 SYN_REPORT 时坐标都到齐了再记起点 */
 				tch_p->pressed = 1;
+				tch_p->waiting_down = 1;
+				tch_p->down_valid = 0;
 			} else {
 				tch_p->pressed = 0;
-				if (tch_p->have_xy)
-					tap = 1;          /* 抬起且坐标有效 = 一次点击 */
+				if (tch_p->have_xy) {
+					/* 修改：抬起时先判手势，再走原来的点击逻辑 */
+					tch_p->gesture =
+						touch_gesture_classify(tch_p, ev_ms);
+					tap = 1;
+				}
+				tch_p->waiting_down = 0;
+				tch_p->down_valid = 0;
+			}
+		} else if (ev.type == EV_SYN && ev.code == SYN_REPORT) {
+			/* 修改：一批事件结束，此时按下位置的 x/y 才是完整的 */
+			if (tch_p->pressed && tch_p->waiting_down) {
+				tch_p->down_x = tch_p->x_val;
+				tch_p->down_y = tch_p->y_val;
+				tch_p->down_ms = ev_ms;
+				tch_p->down_valid = 1;
+				tch_p->waiting_down = 0;
 			}
 		}
 	}
