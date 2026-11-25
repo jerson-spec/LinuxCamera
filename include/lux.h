@@ -4,18 +4,23 @@
 /*
  * 修改：光感读取模块（AP3216C，挂在 /dev/i2c-0 的 0x1e）。
  *
- * 这一版只做用户态直读：
- *   open 总线 -> I2C_SLAVE -> 0x00 写 0x03 使能 -> 读 0x0C/0x0D
- * 等 C 阶段的 ap3216c 驱动上了，地址会被内核占住（EBUSY），
- * 那时再在 lux_open() 里加一条 sysfs 分支，接口不变。
+ * 两条后端，open 时自动选：
+ *   1) 内核驱动 ap3216c 已加载 -> 读
+ *      /sys/bus/iio/devices/iio:deviceN/in_illuminance_input
+ *   2) 没有驱动 -> 直接读写 /dev/i2c-0
+ *
+ * 不能同时走：i2c-dev 在驱动占用地址后返回 EBUSY。
+ * 选哪条是 open 时定的，切换后端需要重启程序。
  */
 
 #define LUX_DEFAULT_DEV     "/dev/i2c-0"
 #define LUX_DEFAULT_ADDR    0x1e
 
 typedef struct {
-	int fd;
-	int addr;
+	int  fd;            /* i2c 直读用的 fd，-1 表示没打开 */
+	int  addr;
+	int  iio;           /* 1 = 走 sysfs，0 = 走 i2c-dev */
+	char path[300];     /* iio 属性文件路径 */
 } lux_t;
 
 int  lux_open(lux_t *lx, const char *dev, int addr);
