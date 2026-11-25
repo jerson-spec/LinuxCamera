@@ -29,6 +29,7 @@ add_library(camera_core STATIC
     src/http.c
     src/backlight.c   # 修改：背光
     src/lux.c         # 修改：光感
+    src/autolight.c   # 修改：自动亮度策略
 )
 target_include_directories(camera_core PUBLIC
     include

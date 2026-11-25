@@ -191,6 +191,25 @@ int backlight_percent(const backlight_t *bl)
 	return (bl->level * 100 + bl->max / 2) / bl->max;
 }
 
+/* 修改：给自动亮度用的档位接口 */
+int backlight_max_level(const backlight_t *bl)
+{
+	return (bl == NULL) ? 0 : bl->max;
+}
+
+int backlight_level(const backlight_t *bl)
+{
+	return (bl == NULL) ? -1 : bl->level;
+}
+
+int backlight_set_level(backlight_t *bl, int level)
+{
+	if (bl == NULL || bl->fd < 0)
+		return -1;
+
+	return bl_apply(bl, level);
+}
+
 void backlight_deinit(backlight_t *bl)
 {
 	if (bl == NULL || bl->fd < 0)

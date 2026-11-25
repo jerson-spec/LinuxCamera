@@ -110,9 +110,9 @@ static long long touch_event_ms(const struct input_event *ev)
  *	修改：把一次触摸分成 点击 / 上滑 / 下滑。
  *	- 位移、时长都用原始坐标和事件时间戳，避开 800x480 -> 1024x600 的映射；
  *	- 阈值取 y 量程的 1/10（600 高约 60 像素），太小的位移仍算点击；
- *	- 超过 600ms 才松手的不算滑动，避免慢慢拖动也触发亮度。
+ *	- 超过 1200ms 才松手的不算滑动，避免慢慢拖动也触发亮度。
  */
-#define TOUCH_SWIPE_MAX_MS  600
+#define TOUCH_SWIPE_MAX_MS  1200
 
 static int touch_gesture_classify(const touch_t *tch_p, long long up_ms)
 {

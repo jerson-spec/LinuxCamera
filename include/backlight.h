@@ -25,4 +25,9 @@ int  backlight_step(backlight_t *bl, int delta);
 int  backlight_percent(const backlight_t *bl);
 void backlight_deinit(backlight_t *bl);
 
+/* 修改：自动亮度按档位运算，避免百分比量化来回抖 */
+int  backlight_max_level(const backlight_t *bl);
+int  backlight_level(const backlight_t *bl);
+int  backlight_set_level(backlight_t *bl, int level);
+
 #endif

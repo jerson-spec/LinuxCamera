@@ -30,6 +30,8 @@
 #include "http.h"
 #include "snapshot.h"
 #include "backlight.h"	/* 修改：背光模块 */
+#include "lux.h"		/* 修改：光感读取 */
+#include "autolight.h"	/* 修改：自动亮度策略 */
 
 static volatile sig_atomic_t g_stop = 0;
 static volatile sig_atomic_t g_save = 0;
@@ -413,6 +415,7 @@ int main(int argc, char **argv)
 	int tch_ok = 0;
 	int http_ok = 0;
 	int bl_ok = 0;		/* 修改：背光是否打开成功 */
+	int lux_ok = 0;		/* 修改：光感是否打开成功 */
 	int http_fd = -1;
 	int poll_timeout_cnt = 0;
 
@@ -423,6 +426,8 @@ int main(int argc, char **argv)
 
 	camera_t cam;
 	backlight_t bl;		/* 修改：背光句柄 */
+	lux_t lx;		/* 修改：光感句柄 */
+	autolight_t al;		/* 修改：自动亮度状态 */
 	letterbox_t lb;
 	unsigned char *rgbbuf = NULL;
 	size_t size = 0;
@@ -439,6 +444,10 @@ int main(int argc, char **argv)
 	double t0, t1, t2, t3, last_t0;
 	double wait_time, conv_time, draw_time, n;
 	double fps = 0.0;
+
+	/* 修改：lux_val = -1 表示还没采到；last_lux_ms 控制 200ms 采样周期 */
+	int lux_val = -1;
+	long long last_lux_ms = 0;
 	
 	char tbuf[32];
 	char filename[512];
@@ -449,6 +458,9 @@ int main(int argc, char **argv)
 	/* 修改：背光先置成"没打开"，cleanup 里只看 bl_ok */
 	memset(&bl, 0, sizeof(bl));
 	bl.fd = -1;
+	/* 修改：光感同理 */
+	memset(&lx, 0, sizeof(lx));
+	lx.fd = -1;
 	memset(&camera_cfg, 0, sizeof(camera_cfg));
 	memset(&lcd_cfg, 0, sizeof(lcd_cfg));
 	memset(&lb, 0, sizeof(lb));
@@ -507,6 +519,18 @@ int main(int argc, char **argv)
 		bl_ok = 1;
 	else
 		LOG_WARN("backlight init failed, continue without it");
+
+	/*
+	 * 修改：3.6 光感 + 自动亮度。
+	 * 光感打不开就退化成纯手动；背光打不开就不会去调它。
+	 * autolight 的档位要跟背光对齐，所以先 init 背光再 init 它。
+	 */
+	autolight_init(&al, bl_ok ? backlight_level(&bl) : 0,
+	               (long long)get_time_ms());
+	if (lux_open(&lx, LUX_DEFAULT_DEV, LUX_DEFAULT_ADDR) == 0)
+		lux_ok = 1;
+	else
+		LOG_WARN("lux init failed, auto brightness off");
 
 	/* 4. 相机：打开、设格式、请求帧率 */
 	pixfmt = camera_pixfmt_from_string(camera_cfg.format);
@@ -825,8 +849,38 @@ int main(int argc, char **argv)
 			int delta = (int)g_bright;
 
 			g_bright = 0;
-			if (bl_ok && backlight_step(&bl, delta) == 0)
-				LOG_INFO("bright: %d%%", backlight_percent(&bl));
+			if (bl_ok && backlight_step(&bl, delta) == 0) {
+				/* 修改：手动调过就让自动让路，并把档位同步过去 */
+				autolight_manual(&al, (long long)get_time_ms());
+				autolight_sync(&al, backlight_level(&bl));
+				LOG_INFO("bright: %d%% (manual)", backlight_percent(&bl));
+			}
+		}
+
+		/*
+		 * 修改：自动亮度。
+		 * 200ms 采一次，不每帧读——读一次几百微秒，每帧读会白吃帧预算。
+		 * 采到值就刷 OSD；背光真的变了才打日志。
+		 */
+		if (lux_ok && (t3 - last_lux_ms) >= AUTOLIGHT_SAMPLE_MS) {
+			int lv;
+
+			last_lux_ms = (long long)t3;
+			if (lux_read(&lx, &lv) == 0) {
+				lux_val = lv;
+
+				if (bl_ok) {
+					int nl = autolight_update(&al, lv,
+					                          backlight_max_level(&bl),
+					                          (long long)t3);
+
+					if (nl >= 0) {
+						backlight_set_level(&bl, nl);
+						LOG_INFO("auto bright: %d%% (lux %d)",
+						         backlight_percent(&bl), lv);
+					}
+				}
+			}
 		}
 
 		/* 拍照：触发源只是置标志，真正处理在循环里 */
@@ -898,8 +952,12 @@ int main(int argc, char **argv)
 		osd_show_text_shadow(lb.x_offset + 8, lb.y_offset + 8,
 		                     (const unsigned char *)line, 0x00FFFFFF, 0x00000000);
 
-		/* 修改：第二行带上当前亮度，滑一下下一帧就能看到变化 */
-		if (bl_ok)
+		/* 修改：第二行带亮度和环境光，滑一下/捂一下就变 */
+		if (bl_ok && lux_ok)
+			snprintf(line, sizeof(line),
+			         "fps: %.1f  drop: %u  bl: %d%%  lux: %d",
+			         fps, dropped, backlight_percent(&bl), lux_val);
+		else if (bl_ok)
 			snprintf(line, sizeof(line), "fps: %.1f  drop: %u  bl: %d%%",
 			         fps, dropped, backlight_percent(&bl));
 		else
@@ -939,7 +997,9 @@ cleanup:
 		close(key_fd);
 	free(rgbbuf);
 
-	/* 修改：背光要在 lcd_deinit 之前收，因为 lcd_deinit 会把日志关掉 */
+	/* 修改：光感 / 背光都要在 lcd_deinit 之前收，因为 lcd_deinit 会把日志关掉 */
+	if (lux_ok)
+		lux_close(&lx);
 	if (bl_ok)
 		backlight_deinit(&bl);
 
