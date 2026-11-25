@@ -12,8 +12,18 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <signal.h>
+#include <time.h>
 
 #include "lux.h"
+
+static void sleep_ms(int ms)
+{
+	struct timespec ts;
+
+	ts.tv_sec = ms / 1000;
+	ts.tv_nsec = (long)(ms % 1000) * 1000000L;
+	nanosleep(&ts, NULL);
+}
 
 static volatile sig_atomic_t g_stop = 0;
 
@@ -51,7 +61,7 @@ int main(int argc, char **argv)
 		}
 
 		fflush(stdout);
-		usleep(200 * 1000);	/* 5Hz，和主程序采样周期一致 */
+		sleep_ms(200);	/* 5Hz，和主程序采样周期一致 */
 	}
 
 	printf("exit, %d samples\n", n);

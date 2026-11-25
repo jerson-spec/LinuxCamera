@@ -347,7 +347,7 @@ static int input_find_event(const char *name)
 {
 	DIR *d = opendir("/sys/class/input");
 	struct dirent *de;
-	char path[128];
+	char path[320];
 	char buf[128];
 	int fd, n;
 
@@ -417,6 +417,7 @@ int main(int argc, char **argv)
 	int bl_ok = 0;		/* 修改：背光是否打开成功 */
 	int lux_ok = 0;		/* 修改：光感是否打开成功 */
 	int http_fd = -1;
+	int key_fd = -1;
 	int poll_timeout_cnt = 0;
 
 	struct fb_var_screeninfo lcd_var_screeninfo;
@@ -648,7 +649,6 @@ int main(int argc, char **argv)
 	int touch_idx = -1;
 	int http_idx = -1;
 	int key_idx = -1;
-	int key_fd = -1;
 	int key_ev;
 	char key_dev[32];
 
