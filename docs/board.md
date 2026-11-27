@@ -3,7 +3,7 @@
 > 本文记录当前开发板、设备节点、网络、工具链、构建、部署和调试方式。
 > 如果换了板子、SDK 或摄像头，先更新本文。
 >
-> 当前阶段：v1.5（网页推流 1 小时通过），W8–W9 驱动进行中。
+> 当前阶段：v1.5（网页推流 1 小时通过），W8–W9 驱动基本完成。
 
 ---
 
@@ -21,8 +21,8 @@
 | LCD | `/dev/fb0`，**1024×600，32bpp** |
 | 触摸 | `goodix-ts`，`/dev/input/event1` |
 | 按键 | KEY1=GPIO5_IO01→`KEY_F1`；KEY2=GPIO4_IO14→`KEY_F2`，低有效 |
-| 背光 | `pwm-backlight`（pwm1，0–10 级），`/sys/class/backlight` |
-| 光感 | memo 说有 I2C 光感，但 DTS 的 `&i2c1` 为空，**未确认** |
+| 背光 | `pwm-backlight`，`/sys/class/backlight/backlight/`，`max_brightness = 8` |
+| 光感 | AP3216C，I2C `0x1e`，总线 `21a0000.i2c`（用户态 `/dev/i2c-0`） |
 | 显示结果 | letterbox 居中，左右各 112 像素黑色 |
 | 主机 | Windows + VMware/Ubuntu 虚拟机 |
 | 连接方式 | USB 转网口直连 + 串口（USB-TTL）+ ADB |
@@ -153,10 +153,44 @@ dmesg | tail -20
 
 ### 1.3 背光 / 光感
 
-- 背光：DTS 有 `pwm-backlight`（pwm1，0–10 级），先确认
-  `/sys/class/backlight/backlight/brightness` 是否存在；
-- 光感：memo 说 I2C，但当前 `&i2c1` 为空，先 `i2cdetect -y 1` 确认硬件，
-  没有就不要硬写驱动。
+**背光**：`pwm-backlight`，`/sys/class/backlight/backlight/`，`max_brightness = 8`。
+程序里用百分比对外，内部换算成 0–8 档；80% 落在第 6 档，所以 OSD 上会显示 75%，
+这是量化误差不是 bug。手动试：
+
+```bash
+B=/sys/class/backlight/backlight
+cat $B/max_brightness        # 8
+echo 5 > $B/brightness
+echo 8 > $B/brightness
+```
+
+程序退出时会把启动前的值恢复，`kill -9` 不会。
+
+**光感**：AP3216C，挂在 `21a0000.i2c`（`/dev/i2c-0`）的 `0x1e`。
+编号和名字差一位，别被 `i2c1` 这个名字带偏：
+
+```bash
+i2cdetect -l                 # 21a0000.i2c 对应 i2c-0
+i2cdetect -y 0               # 应看到 0x1e
+```
+
+两条读法：
+
+```bash
+# 1. 用户态直读（没有驱动时）
+i2cset -y 0 0x1e 0x00 0x03
+i2cget -y 0 0x1e 0x0c
+i2cget -y 0 0x1e 0x0d
+
+# 2. 驱动加载后走 IIO
+insmod /root/ap3216c.ko
+cat /sys/bus/iio/devices/iio:device*/in_illuminance_input
+```
+
+驱动占住地址后 `i2cget` 会报 `Device or resource busy`，正常；`rmmod ap3216c` 恢复。
+
+实测：全黑 0、室内 80–90、手电约 1000。刚上电那几拍读数是 0–3，不可信，
+自动亮度做了 1 秒启动宽限。
 
 ---
 
@@ -242,7 +276,7 @@ cat /sys/class/graphics/fb0/virtual_size
 | `/dev/input/event2` | USB 2.0 Camera | 摄像头自带按键（`KEY_CAMERA`），不用 |
 | `/dev/input/event3` | `lc-button` | 我们的按键驱动，`insmod` 后才出现 |
 
-`event` 编号会随加载顺序变化，应用里**不要写死**，用
+`event` 编号会随加载顺序变化，故应用里**没有写死**，用
 `/sys/class/input/event*/device/name` 按名字找。触摸找 `goodix-ts`，按键找
 `lc-button`。
 
@@ -541,8 +575,9 @@ p lcd_var_screeninfo_t
 - 按键驱动假设 `button-gpios` 正好两个 GPIO；`gpio-keys` 必须 disabled；
 - 改完内核模块必须 `rmmod` 再 `insmod`，否则跑旧 `.ko`；
 - 板子上没有 `evtest`，用 `dmesg` 的 evbug 或 `hexdump`；
-- 主循环里还有 `poll revents mismatch` 的 WARN，是噪音；
-- I2C 光感硬件未确认，背光节点待确认；
+- 主循环里 `poll revents mismatch` 的 WARN 已经注释掉，不用再管；
+- 光感走驱动时 IIO 设备号不固定，应用按 `name` 找；驱动加载后 `i2cget` 报 EBUSY 属正常；
+- 自动亮度上电后有 1 秒宽限，手动滑动后 30 秒内不会被自动改回去；
 - 切到 800×600 固定 1.7 s，首帧延迟 1–1.6 s；
 - 温度长跑稳定在 68–71℃。
 

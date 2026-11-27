@@ -715,7 +715,7 @@ yuyv: hoist chroma terms per pixel pair, inline clamp, drop memcpy (conv 25.9 ->
 
 
 
-		# [ driver: platform button input and app integration ]——26_11_23
+# [ driver: platform button input and app integration ]——26_11_23
 
 - 字符设备驱动这块没什么好说的，看代码五分钟就能懂，比较简单，之后想实现按下板子上的按键就能拍照或切换，于是这样去做，先查看板子原理图，按“key”关键词索引查找按键原理图，之后知道是哪个口、触发方式，便去对应修改设备树，配置Pinctrl（结合NXP公司推出的设备树生成工具）和GPIO子系统，之后写驱动，最后再在test_camera_preview测试程序里用，驱动这边等待按键触发中断、上报输入事件，应用这边打开输入设备节点，poll等待可读输入事件，再对应置全局变量，便可实现按键拍照、按键切换分辨率的目的；——思路是这样，过程让ai帮写代码，我做审查，他实现的很多功能和接口函数有的我接触过，有的换了一种形式，还有的完全没见过，于是跳转到对应的地方查看注释或上网搜索，也都能弄懂，程序毫无疑问没有运行问题，上机可用；值得一提的是ai一开始并没有按照我设想的方案走，就比如更改设备数和枚举设备树设备节点GPIO个数那一块，他的实现要么想走捷径要么想走完美的那条路，与我设想的不一样，这个时候坚持自己的实现方案并让他实施，而不是随着他怎么改就怎么改脱离我的掌控，并且我也不想让问题复杂化，能用即可，健壮性以后再说；
 
@@ -772,3 +772,38 @@ yuyv: hoist chroma terms per pixel pair, inline clamp, drop memcpy (conv 25.9 ->
   ```
 
   
+
+# [ light_app ]——2026_11_24
+
+-  （backlight: sysfs brightness control 、  touch: swipe gesture to adjust brightness ）、 (lux: AP3216C userland ALS reader 、  autolight: ambient light driven backlight 、 app: fix key_fd init and input name buffer)；
+
+- 这一部分代码全是 ai 写的，没有什么需要调试解决的问题，除了代码编译的几处警告，后面问 ai 对应修改都能解决；
+
+- 第一部分是直接命令读取 sysfs 背光模块数据，再与触摸屏“滑动”动作结合，往里写数据，实现“上滑->使背光亮度增加、下滑->使背光亮度降低”的效果，sysfs 背光最大值是 8，最低到 0，代码里需要做百分比和这个 0~8 档位的换算，显示用百分比，计算用档位；（backlight.c/h 、 touch.c/h 、test_camera_preview.c）
+
+- 第二部分是继续做的动作，实现 sysfs 背光模块数据与光感传感器数据的结合，先做一个小实验使能光感传感器，发送命令读光强值后分别看默认、遮挡、手电照射时这个值是多少，之后根据值划档分出百分比档位，之后程序里实现读值函数，根据值和划好的百分比档位分档判定是哪一个百分比，再对应到 0~8 档数值写进 sysfs，最后显示当然还是显示档位对应的百分比，按照之前程序的实现；三个 commit 层层递进，第一个测试程序，简单读取数据并打印，第二个增加 autolight 相关函数，提供传感器数据处理接口给主函数 test_camera_preview 调用，和测试程序一样每 200ms 读取一次光感传感器数值，之后划档、写入 sysfs 文件，至此实现应用程序端光感传感器与屏幕背光的联系，第三个修改一些编译警告问题；（第一个commit：lux.c/h 、test_lux.c）（第二个commit： autolight.c/h 、test_camera_preview.c）
+
+  code -> git : 
+
+    ```
+     以上五个commit;
+    ```
+
+
+
+# [ light_driver ]——2026_11_25
+
+- driver: AP3216C IIO light sensor、 lux: prefer iio sysfs, fall back to i2c-dev；
+
+- 同上，ai 写的代码，没有编译错误，装载驱动模块后正常读值，暗->正常->亮 数值变化正常，此时再尝试 i2cget 读数会报 busy 错误，属于正常；之后第二个 commit 实现了兼容“应用程序直读 AP3216C（挂在 /dev/i2c-0）” 和 “走内核驱动读” 两条路径，两者本质上都会走内核，区别在于后者是我们自己主动添加实现，在里面做原来在应用端做的传感器初始化、数据读取工作，据此实现代码解耦，支持长期维护；
+
+- 第一部分驱动函数的逻辑代码实现不难理解，一些细节函数调用的地方进去内核源码里看，结合 ai 的解释，很快能弄懂，这里不赘述；（driver/ap3216c/ap3216c.c  、driver/ap3216c/ap3216c.patch ）
+
+- 第二部分对应的是驱动函数这边实现完后应用代码这边读 sysfs 下生成的 IIO 节点下设备文件（/sys/bus/iio/devices/iio:deviceN/in_illuminance_input）数据的实现，如上所述也是内核帮我们实现底层的 I2C 协议数据收发，我们只管数据的发、收而不用关心底层的具体实现；除此之外，把这条读 I2C 数据的路径同之前的应用直读 /dev/i2c-0 的路径结合起来，优先走驱动，驱动在 sysfs 下找不到设备的话就退到应用直读，同时这样主程序 test_camera_preview.c 中不需要修改任何代码，原因在于我们只是在 lux.c 中新增了一条读数路径的实现与选择，而与主程序无关，主程序读数时只需要调用读数接口即可；（lux.c/h）
+
+  code -> git : 
+
+    ```
+   以上两个commit;
+    ```
+

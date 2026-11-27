@@ -38,6 +38,12 @@ driver/
     ├── button_plat.c
     ├── Makefile
     └── lc_button.patch      # 设备树改动，应用到内核树
+
+├── ap3216c/
+│   ├── ap3216c.c
+│   ├── Makefile
+│   ├── ap3216c.patch      # 内核树 .dts 的差异，重建环境用
+│   └── README.md
 ```
 
 `driver/` 不参与顶层 CMake，和用户态程序是两套构建。
@@ -206,27 +212,145 @@ button: 1 irq=... key=60
 
 ---
 
-## 5. 还没做：I2C 光感
+## 5. `ap3216c`：I2C 光感 + IIO
 
-memo 里提到“板子上的光感传感器，是 I2C 的”，但当前 DTS 的 `&i2c1` 是空的，
-没有 AP3216C 之类的子节点。
+### 5.1 先摸清硬件
 
-先确认硬件：
+之前一直以为光感在 `i2c1`，实际是这么对上的：
 
 ```bash
 ls /dev/i2c-*
-i2cdetect -y 1
+i2cdetect -l          # 21a0000.i2c → i2c-0；21a4000.i2c → i2c-1
+i2cdetect -y 0        # 0x1e 上有个设备
+i2cdetect -y 1        # 只有触摸、EEPROM 之类，没有光感
 ```
 
-- 如果看到 `0x1e`，大概率是 AP3216C；
-- 先用 `/dev/i2c-1` + `I2C_SLAVE` 在用户态读寄存器，确认型号和寄存器；
-- 再写 `i2c_driver`（`compatible`、`probe`、`i2c_smbus_read_byte_data`），
-  暴露一个 sysfs 属性或 misc 设备给应用读 lux；
-- 没有光感的话，这条功能先跳过，不要为了凑功能硬做。
+| 项目 | 值 |
+|---|---|
+| 总线 | `21a0000.i2c`，设备树 `&i2c1`，用户态 `/dev/i2c-0` |
+| 地址 | `0x1e` |
+| 型号 | AP3216C（写 `0x00=0x03` 能回读 `0x03`） |
+| 用到的通道 | 只读 ALS（环境光），PS/IR 没用 |
 
-背光这边 DTS 已经有 `pwm-backlight`（`pwms = <&pwm1 0 1000>`，亮度 0–10），
-板子上应该有 `/sys/class/backlight/backlight/brightness`。光感/上滑调亮度的前提是
-先确认这个节点存在。
+**设备树叫 `i2c1`，用户态是 `i2c-0`，编号差一位。** 之前文档里写的
+`i2cdetect -y 1` 就是这么错的，以后统一以 `i2cdetect -l` 打出来的
+`21a0000.i2c` 为准。
+
+### 5.2 用户态先把寄存器和换算走通
+
+写驱动之前先用 i2c-tools 确认，别拿猜测的寄存器表去写内核代码：
+
+```bash
+i2cset -y 0 0x1e 0x00 0x03      # 使能 ALS+PS+IR
+i2cget -y 0 0x1e 0x00           # 期望回读 0x03
+i2cget -y 0 0x1e 0x0c           # ALS 低字节
+i2cget -y 0 0x1e 0x0d           # ALS 高字节，bit7 是有效标志
+```
+
+```text
+ALS = ((高字节 & 0x7F) << 8) | 低字节
+lux = ALS * 0.35
+```
+
+实测四组数，后来直接成了自动亮度的阈值依据：
+
+| 场景 | lux |
+|---|---|
+| 全黑 / 手遮住 | 0 |
+| 刚上电那几拍 | 0–3（不可信，见 5.6） |
+| 室内常态 | 80–90 |
+| 手电贴着照 | ~1000 |
+
+这一版的用户态代码是 `src/lux.c` + `tests/manual/test_lux.c`。
+
+### 5.3 设备树
+
+追加到 `.dts` 末尾，不叠 patch——`lc_button.patch` 已经把文件改过一轮，
+再按行号插一个 patch 很容易对不上：
+
+```dts
+&i2c1 {
+	status = "okay";
+
+	ap3216c@1e {
+		compatible = "linuxcamera,ap3216c";
+		reg = <0x1e>;
+	};
+};
+```
+
+重编 dtb、备份、替换、`sync` 两次、重启，然后确认节点：
+
+```bash
+ls /proc/device-tree/i2c@21a0000/ | grep ap3216c
+```
+
+`insmod` 报 `-ENODEV` 时先查这一行：有节点说明问题在驱动，没节点说明
+dtb 根本没换。
+
+`driver/ap3216c/ap3216c.patch` 是从内核树 `git diff` 出来的整份 `.dts`
+差异，**包含之前 lc_button 的改动**。它只用来说明“当时树里是什么样”，
+重建环境时和 `lc_button.patch` 不要叠着打。
+
+### 5.4 驱动做了什么
+
+`driver/ap3216c/ap3216c.c`，`i2c_driver` + IIO，约 150 行。
+
+| 部分 | 内容 |
+|---|---|
+| 匹配 | `compatible = "linuxcamera,ap3216c"` |
+| probe | 检查 SMBUS 能力 → `devm_iio_device_alloc` → 写 `0x00=0x03` → `msleep(20)` → 注册 |
+| 通道 | 一个：`IIO_LIGHT` + `IIO_CHAN_INFO_PROCESSED` |
+| 读数 | `read_raw` 里读 `0x0C/0x0D`，乘 0.35，返回 `IIO_VAL_INT` |
+| 释放 | 全走 `devm_*`，所以没写 `remove()` |
+
+用户态看到的是：
+
+```bash
+cat /sys/bus/iio/devices/iio:deviceN/in_illuminance_input
+```
+
+为什么用 `processed` 而不是 `raw + scale`：`als * 0.35` 是芯片特性，
+不是产品逻辑。换算放驱动，换传感器时用户态不用改；阈值、迟滞、档位仍然
+留在应用里——**驱动只搬数据，不做决策**。
+
+### 5.5 两个坑
+
+- 驱动加载后 `i2cget -y 0 0x1e ...` 会报 `Device or resource busy`。
+  这是地址被占住的证据，不是故障；`rmmod ap3216c` 就恢复；
+- **IIO 设备号不固定**（`iio:device0/1/2`，看加载顺序）。用户态必须按
+  `device/name` 找，不能写死编号，`src/lux.c` 里就是扫名字。
+
+### 5.6 应用侧两条后端
+
+`lux_open()` 先找 IIO 节点，找不到再退回直读：
+
+```text
+驱动已加载  → /sys/bus/iio/devices/.../in_illuminance_input
+驱动没加载  → open /dev/i2c-0 + I2C_SLAVE 0x1e
+```
+
+两条不能同时走（地址只有一个主人），走哪条在 `open` 时定，切换要重启程序。
+这样调试时 `rmmod` 就能回直读，演示时装驱动走标准接口，主程序一行不用改。
+
+自动亮度为什么有 1 秒启动宽限：als 刚使能时读数是 0–3，不可信。`probe` 里
+`msleep(20)` 只够芯片应答，不够积分稳定，所以策略层再等 1 秒。
+
+### 5.7 编译 / 上板
+
+```bash
+cd driver/ap3216c && make
+adb push ap3216c.ko /root/
+adb shell rmmod ap3216c 2>/dev/null
+adb shell insmod /root/ap3216c.ko
+adb shell dmesg | tail
+adb shell 'cat /sys/bus/iio/devices/iio:device*/in_illuminance_input'
+```
+
+期望 `dmesg` 有一行 `AP3216C light sensor registered`。
+
+内核没开 `CONFIG_IIO` 会编不过或加载失败；`=m` 时板上还得有
+`industrialio.ko`。改完 `.ko` 记得先 `rmmod` 再 `insmod`，这条对所有模块都成立。
 
 ---
 
@@ -249,6 +373,17 @@ adb shell dmesg | tail
 adb shell dmesg -c >/dev/null
 # 按 KEY1 / KEY2
 adb shell dmesg | tail -20
+
+# ap3216c（光感）
+cd driver/ap3216c && make
+adb push ap3216c.ko /root/
+adb shell rmmod ap3216c 2>/dev/null
+adb shell insmod /root/ap3216c.ko
+adb shell dmesg | tail
+adb shell 'cat /sys/bus/iio/devices/iio:device*/in_illuminance_input'
+
+# 退回用户态直读
+adb shell rmmod ap3216c
 ```
 
 模块必须用**板子对应的内核树**编译，否则 `insmod` 会报

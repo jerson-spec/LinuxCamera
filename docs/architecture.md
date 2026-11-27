@@ -1,6 +1,6 @@
 # 架构说明
 
-> 当前状态：**v1.5 + W8–W9 驱动进行中**（预览/触摸/OSD/拍照/HTTP + 自写字符设备、platform/input 按键）。
+> 当前状态：**v1.5 + W8–W9 驱动基本完成**（预览/触摸/OSD/拍照/HTTP + 字符设备、platform/input 按键、I2C 光感）。
 >
 > 本文描述当前真实代码结构，不描述理想中的最终架构。
 > 新会话请先读 `docs/handoff.md`，再读本文；驱动细节看 `docs/driver.md`。
@@ -32,7 +32,7 @@ V4L2 采集 → YUYV 转换 → LCD 显示 → 拍照/存卡 → 网络推流
 
 ```text
 v1.5：预览 + 触摸 + 按键 + 拍照 + 切分辨率 + OSD + 8h 长跑 + 网页推流
-W8–W9：hello_misc（字符设备/poll） + button_plat（platform/input） → I2C 未做
+W8–W9：hello_misc（字符设备/poll） + button_plat（platform/input） + ap3216c（I2C 光感/IIO） + 自动亮度
 ```
 
 ---
@@ -348,7 +348,29 @@ void camera_close(camera_t *cam);
   - `/stream` → 切一次 MJPG，循环 `DQBUF → send 分片 → QBUF`，退出恢复 YUYV；
 - 客户端连接先 `poll(300ms)`，浏览器预连接不发请求就直接关掉，避免堵住主循环。
 
-### 5.9 `driver`
+### 5.9 `backlight` / `lux` / `autolight`
+
+三个小模块，都是为“屏幕跟着环境光走”拆出来的：
+
+```text
+include/backlight.h  src/backlight.c   sysfs 亮度，按档位操作
+include/lux.h        src/lux.c         AP3216C 读数，IIO 优先、i2c-dev 兜底
+include/autolight.h  src/autolight.c   纯策略：lux → 档位
+```
+
+- `backlight`：只认 `/sys/class/backlight/backlight`。对外用百分比，内部按
+  0..`max_brightness` 的档位走（本板 8 档），退出时恢复启动前的值；
+- `lux`：先扫 `/sys/bus/iio/devices/*/name` 找 `ap3216c`，找到就读
+  `in_illuminance_input`；找不到退回 `/dev/i2c-0` 直读。两条路不能同时走，
+  选哪条在 `open` 时定；
+- `autolight`：不碰 I/O，不打日志，输入 lux 和档位上限，输出下一档或 -1。
+  阈值按实测定（0 / 80–90 / 1000 lux），连续 3 次一致才认，一次走一档，
+  手动滑动后 30 秒不自动，上电 1 秒宽限。
+
+主循环里三者的顺序是 `lux_read()` → `autolight_update()` →
+`backlight_set_level()`，200ms 一次，不占帧时间。
+
+### 5.10 `driver`
 
 `driver/` 是 W8–W9 的内核模块，和用户态 CMake 完全分开：
 
@@ -357,10 +379,14 @@ void camera_close(camera_t *cam);
   - `button-gpios` 第 0 个 → `KEY_F1`（拍照），第 1 个 → `KEY_F2`（切分辨率）；
   - input 设备名 `lc-button`，应用按名字找；
   - 设备树补丁在 `driver/button_plat/lc_button.patch`。
+- `ap3216c/`：i2c_driver + IIO，设备树匹配 `linuxcamera,ap3216c`；
+  - 只开一个 `IIO_LIGHT` 通道，报 processed 值；
+  - 用户态读 `/sys/bus/iio/devices/iio:deviceN/in_illuminance_input`；
+  - 换算（`ALS * 0.35`）在驱动里，阈值策略仍在应用里。
 
 应用侧只从 `/dev/input/eventX` 读 `input_event`，不关心 GPIO/中断细节。
 
-### 5.10 `tests/manual`
+### 5.11 `tests/manual`
 
 | 程序 | 作用 |
 |---|---|
@@ -368,16 +394,19 @@ void camera_close(camera_t *cam);
 | `test_Draw_region.c` | LCD 参数打印 + 绘制区域 |
 | `test_Trans_YUYV.c` | 合成 YUYV 色条 → RGB → LCD |
 | `test_camera_preview.c` | v1.5 主程序：预览 + 触摸 + 按键 + 拍照 + OSD + HTTP |
+| `test_lux.c` | 光感直读小测试，5Hz 打印 lux |
 
-### 5.11 构建目标
+### 5.12 构建目标
 
 ```text
 camera_core          # config.c + log.c + lcd.c + yuyv.c + camera.c + osd.c + touch.c + http.c
+                     # + backlight.c + lux.c + autolight.c
 camera               # src/main.c，配置检查占位
 test_Get_images      # 采集测试
 test_Draw_region     # LCD 区域测试
 test_Trans_YUYV      # YUYV 色条演示
 test_camera_preview  # v1.5 主程序
+test_lux             # 光感直读小测试
 config_test          # 配置测试
 ```
 
@@ -431,12 +460,13 @@ config_test          # 配置测试
 - 推流切一次 MJPG，循环取帧发送，退出恢复 YUYV；
 - 300ms 空连接超时；1 小时推流 RSS/fd 不涨。
 
-### W8–W9 进行中
+### W8–W9 基本完成
 
-- 已完成：`hello_misc`（字符设备/poll/等待队列）、`button_plat`（platform/input）；
-- 设备树补丁；应用按键接入；
-- 下一步：I2C 光感（先确认硬件）、背光/亮度；
-- 有余力再看 UVC/V4L2 内核代码。
+- `hello_misc`：字符设备 / poll / 等待队列；
+- `button_plat`：platform + input，两个按键；
+- `ap3216c`：I2C 光感 + IIO，`in_illuminance_input`；
+- 应用侧：背光、上下滑调亮度、按环境光自动调亮度；
+- 剩下的是产品侧（锁定屏、设置菜单），以及有余力再看 UVC/V4L2 内核代码。
 
 ### v2.0 前要做的重构
 

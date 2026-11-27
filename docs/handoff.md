@@ -1,10 +1,10 @@
 # 项目交接（Handoff）
 
-> **新会话请先读本文，再读 `docs/handoff-prompt.md` 里那段提示词。**
+> **新会话先读本文，再按下面的顺序补细节。**
 >
 > 推荐顺序：
 > 1. 本文（项目是什么、做到哪、怎么跑、下一步）
-> 2. `docs/driver.md`（W8–W9 驱动细节，当前正在做）
+> 2. `docs/driver.md`（W8–W9 驱动细节：hello_misc、button_plat、ap3216c）
 > 3. `docs/architecture.md`（模块、数据流、技术债）
 > 4. `docs/board.md`（板子、网络、部署、调试）
 > 5. `docs/roadmap.md`（版本计划、memo 里的产品想法）
@@ -20,24 +20,26 @@
 | 项目 | 当前值 |
 |---|---|
 | 项目 | i.MX6ULL Linux 相机（本地 + 网页） |
-| 当前阶段 | **v1.5 已打标签；W8–W9 驱动进行中** |
-| 应用层 | v1.5：预览 + 触摸 + OSD + 拍照 + HTTP 推流 |
-| 驱动层 | 已完成 `hello_misc`、`button_plat`；I2C 未做 |
+| 当前阶段 | **v1.5 已打标签；W8–W9 驱动基本完成** |
+| 应用层 | v1.5：预览 + 触摸 + OSD + 拍照 + HTTP 推流；背光/自动亮度已接 |
+| 驱动层 | 已完成 `hello_misc`、`button_plat`、`ap3216c`（IIO 光感） |
 | 语言 | C（用户态），C（内核模块） |
 | 采集 | V4L2 MMAP，4 buffer，`poll`，`VIDIOC_S_PARM` |
 | 显示 | `/dev/fb0`，1024×600，32bpp，双缓冲 + letterbox |
 | 摄像头 | `/dev/video1`，800×600@15 / 640×480@30 / 352×288@30 |
 | 触摸 | `goodix-ts`，`/dev/input/event1`（按名字找，不写死） |
 | 按键 | KEY1=GPIO5_1→`KEY_F1`拍照；KEY2=GPIO4_14→`KEY_F2`切分辨率 |
+| 背光 | `/sys/class/backlight/backlight/`，`max_brightness = 8` |
+| 光感 | AP3216C，I2C `0x1e`，总线 `21a0000.i2c`（`/dev/i2c-0`） |
 | 板子 IP | `192.168.10.50`（USB 转网口直连 PC） |
 | HTTP | `/`、`/snapshot.jpg`、`/stream`，端口 8888 |
-| 当前标签 | `v1.0`、`v1.5`；HEAD 见 `git log --oneline -3` |
-| 下一步 | I2C 光感/背光，然后 OSD 设置、相册、v2.0 |
+| 当前标签 | `v1.0`、`v1.5`，以及几个里程碑标签；HEAD 见 `git log --oneline -3` |
+| 下一步 | 锁定触摸屏、OSD 设置菜单，然后 v2.0 |
 
 一句话：
 
 > **v1.5 已经能演示：LCD 预览、触摸/按键拍照、切分辨率，浏览器看 MJPEG 流；
-> 现在正在把按键/光感这些硬件通过自写驱动接进来。**
+> 现在按键、背光、光感都通过自写驱动接进来了，屏幕会跟着环境光调亮度。**
 
 ---
 
@@ -74,7 +76,7 @@ v0.5   连续预览 + 双缓冲 + FPS，10 分钟不崩
 W3     YUYV→RGB 定点化 + 按行写，CPU 98%→34%，640×480@30
 v1.0   触摸 + OSD + MJPEG 拍照 + 8 小时长跑（610390 帧，0 错误）
 v1.5   HTTP：/、/snapshot.jpg、/stream；1 小时推流，延迟约 300ms
-W8–W9  hello_misc → button_plat（platform + input）→ I2C（未做）
+W8–W9  hello_misc → button_plat（platform + input）→ ap3216c（IIO 光感）→ 自动亮度
 ```
 
 ---
@@ -92,21 +94,27 @@ LinuxCamera/
 │   ├── lcd.ini
 │   └── trans.ini
 ├── include/
+│   ├── autolight.h
+│   ├── backlight.h
 │   ├── camera.h
 │   ├── config.h
 │   ├── http.h
 │   ├── lcd.h
 │   ├── log.h
+│   ├── lux.h
 │   ├── osd.h
 │   ├── snapshot.h
 │   ├── touch.h
 │   └── yuyv.h
 ├── src/
+│   ├── autolight.c
+│   ├── backlight.c
 │   ├── camera.c
 │   ├── config.c
 │   ├── http.c
 │   ├── lcd.c
 │   ├── log.c
+│   ├── lux.c
 │   ├── osd.c
 │   ├── touch.c
 │   ├── yuyv.c
@@ -118,10 +126,15 @@ LinuxCamera/
 │   │   ├── Makefile
 │   │   ├── README.md
 │   │   └── test_hello.c
-│   └── button_plat/
-│       ├── button_plat.c
+│   ├── button_plat/
+│   │   ├── button_plat.c
+│   │   ├── Makefile
+│   │   └── lc_button.patch    # 设备树补丁
+│   └── ap3216c/
+│       ├── ap3216c.c
 │       ├── Makefile
-│       └── lc_button.patch    # 设备树补丁
+│       ├── ap3216c.patch      # 内核树 .dts 差异（含之前 lc_button 改动）
+│       └── README.md
 ├── tests/
 │   ├── manual/
 │   │   ├── test_Get_images.c
@@ -135,7 +148,6 @@ LinuxCamera/
 │   ├── board.md
 │   ├── driver.md
 │   ├── handoff.md
-│   ├── handoff-prompt.md
 │   ├── performance.md
 │   ├── release-v1.0.md
 │   ├── release-v1.5.md
@@ -169,9 +181,10 @@ LinuxCamera/
 - 按键：
   - KEY1 = GPIO5_IO01（SNVS_TAMPER1），低有效，`KEY_F1`；
   - KEY2 = GPIO4_IO14（NAND_CE1_B），低有效，`KEY_F2`；
-- 背光：DTS 里有 `pwm-backlight`（pwm1，亮度 0–10），板子上应有
-  `/sys/class/backlight/backlight/brightness`；
-- 光感：memo 说有 I2C 光感，但当前 DTS 的 `&i2c1` 是空的，**未确认硬件**；
+- 背光：DTS 里有 `pwm-backlight`，`/sys/class/backlight/backlight/`，
+  `max_brightness = 8`；
+- 光感：AP3216C，I2C `0x1e`，总线 `21a0000.i2c`（用户态 `/dev/i2c-0`），
+  已确认并有驱动；
 - 串口：USB-TTL，115200 8N1；
 - 网络：USB 转网口直连 PC。
 
@@ -290,8 +303,9 @@ http://192.168.10.50:8888/snapshot.jpg    单张 JPEG
 
 - `hello_misc`：misc 字符设备，read/write/ioctl/poll/等待队列；
 - `button_plat`：platform 驱动 + input 子系统，两个 GPIO、两个键；
-- 设备树补丁 `driver/button_plat/lc_button.patch`；
-- 应用已接入按键：按名字找 `lc-button` 的 event，`KEY_F1` 拍照、`KEY_F2` 切分辨率。
+- `ap3216c`：i2c_driver + IIO，光感以 `in_illuminance_input` 形式暴露；
+- 设备树：`driver/button_plat/lc_button.patch`，以及追加到 `.dts` 末尾的 `&i2c1 { ap3216c@1e; }`；
+- 应用已接入：按键（按名字找 `lc-button`）、上下滑调亮度、按环境光自动调亮度。
 
 ### 6.2 当前行为
 
@@ -306,21 +320,35 @@ button: 1 irq=... key=60
 - 如果只有一行，说明跑的是旧单键 `.ko`：`rmmod` 后重新 `insmod` 新编的；
 - 应用日志里会有 `button: /dev/input/eventX`。
 
+光感和亮度这边：
+
+- 驱动加载时 `dmesg` 有一行 `AP3216C light sensor registered`，
+  应用日志是 `lux: /sys/bus/iio/devices/iio:deviceX/in_illuminance_input`；
+- 驱动没加载时退回直读，应用日志是 `lux: /dev/i2c-0 addr 0x1e (i2c-dev)`，
+  OSD 上的 lux 数值一样；
+- 自动亮度每 200ms 采一次，连续 3 次一致才改，一次走一档；
+  上电有 1 秒宽限，手动滑动后 30 秒内不再自动调；
+- 实测：全黑 0 → 25%，室内 80–90 → 75%，手电约 1000 → 100%。
+
 ### 6.3 已知问题
 
-- `test_camera_preview.c` 里还有一条 `poll revents mismatch` 的 WARN，
-  按键/触摸/HTTP 唤醒 poll 而摄像头没帧时会打印，属于噪音，建议删掉；
+- `poll revents mismatch` 的 WARN 已经注释掉，日志里不该再出现这条；
 - 驱动假设 `button-gpios` 里正好两个 GPIO；只写一个会 probe 失败；
 - `gpio-keys` 必须 `disabled`，否则 GPIO 被占；
 - 板子上没有 `evtest`；可以用 `dmesg` 里的 `evbug`，或 `hexdump -C /dev/input/eventX`；
+- 驱动加载后 `i2cget -y 0 0x1e ...` 会报 `Device or resource busy`，属正常；
+- IIO 设备号不固定（`iio:device0/1/2`），应用按 `name` 找，不写死编号；
+- 改完任何 `.ko` 都要 `rmmod` 再 `insmod`，否则跑的是旧模块；
 - DTS patch 在 Windows 上生成容易变成 UTF-16，`patch` 会报
   “Only garbage was found”；要转 ASCII/UTF-8，或在 Ubuntu 上用 `diff` 生成。
 
 ### 6.4 还没做
 
-- I2C 光感：先 `i2cdetect -y 1` 确认硬件，再决定写不写驱动；
-- 背光：`/sys/class/backlight/backlight/brightness` 确认可用后，再做上滑/光感调亮度；
-- 更深的 input/poll 练习可以继续，但产品优先。
+- OSD 设置菜单：亮度、熄屏、governor；
+- 锁定触摸屏：点图标后禁掉拍照/切分辨率，滑动和按键保留；
+- 相册 / Web 管理；
+- v2.0：线程化（本地预览 + 推流同时）、拆 `app.c`、单元测试、
+  Buildroot 精简 + 开机自启 + 看门狗。
 
 ---
 
@@ -357,14 +385,18 @@ cd /root/LinuxCamera
 ```bash
 cd driver/hello_misc && make
 cd ../button_plat && make
+cd ../ap3216c && make
 
-adb push hello_misc.ko button_plat.ko /root/
+adb push hello_misc.ko button_plat.ko ap3216c.ko /root/
 adb shell rmmod button_plat 2>/dev/null
 adb shell insmod /root/button_plat.ko
+adb shell rmmod ap3216c 2>/dev/null
+adb shell insmod /root/ap3216c.ko
 adb shell dmesg | tail
 ```
 
 模块必须用板子对应的内核树编译；`insmod` 已加载模块会失败，先 `rmmod`。
+`ap3216c` 要求内核开了 `CONFIG_IIO`；`=m` 时板上还要有 `industrialio.ko`。
 
 ### 7.3 设备树
 
@@ -378,6 +410,28 @@ make ARCH=arm CROSS_COMPILE=arm-buildroot-linux-gnueabihf- \
 ```
 
 备份板子 `/boot/100ask_imx6ull-14x14.dtb`，推新的、`sync`、重启。
+
+光感的节点是**追加**到 `.dts` 末尾的，不叠 patch：
+
+```dts
+&i2c1 {
+	status = "okay";
+
+	ap3216c@1e {
+		compatible = "linuxcamera,ap3216c";
+		reg = <0x1e>;
+	};
+};
+```
+
+追加完一样重编 dtb、替换、`sync` 两次、重启，然后确认：
+
+```bash
+ls /proc/device-tree/i2c@21a0000/ | grep ap3216c
+```
+
+`driver/ap3216c/ap3216c.patch` 是从内核树 `git diff` 出的整份 `.dts` 差异，
+里面也包含 lc_button 的改动，只用于记录，别和 `lc_button.patch` 叠着打。
 
 ### 7.4 网络/网页
 
@@ -433,9 +487,9 @@ tail -f soak/soak_*.log
 2. `gpio-keys` 必须 disabled；
 3. 改完模块不 `rmmod` 会加载旧 `.ko`，表现“代码没生效”；
 4. DTS patch 编码/路径问题；
-5. `poll revents mismatch` WARN 噪音；
+5. 光感驱动占了 `0x1e`，`i2cget` 会 `EBUSY`，属正常；
 6. 没有 `evtest`，用 evbug/hexdump；
-7. 光感硬件未确认。
+7. IIO 设备号不固定，应用按 `name` 找。
 
 ### 构建
 
@@ -449,21 +503,22 @@ tail -f soak/soak_*.log
 
 ### 马上
 
-1. 确认 `driver/button_plat/README.md` 和 DTS patch 已提交；
-2. 确认按键在应用里拍照/切分辨率都正常。
+1. 锁死当前状态：`git status` 干净，`driver/ap3216c/` 和 `lux`、`autolight` 都已提交；
+2. 板子上把三轮演示跑一遍：预览 + KEY1/KEY2 + 上滑/下滑 + 遮光/手电。
 
-### W8–W9 继续
+### 产品侧（M1 收尾）
 
-1. `i2cdetect -y 1` 确认光感是否存在；
-2. 有的话：用户态读寄存器 → `i2c_driver` → sysfs/misc 暴露 lux → 自动亮度；
-3. 确认 `/sys/class/backlight`，做上滑/光感调亮度；
-4. 再考虑 OSD 设置（亮度、熄屏、governor）。
+1. 锁定触摸屏：右黑边放个图标，点了就禁掉拍照/切分辨率，滑动和按键保留；
+2. OSD 设置菜单：亮度、熄屏、governor；
+3. 再往后是相册/Web 管理。
 
-### 产品/长期
+### v2.0
 
-- memo 里的 M1–M5 见 `docs/roadmap.md` 第 10 节；
-- 优先级：按键/亮度 → 相册/Web 管理 → 双端同时（先测 libjpeg-turbo）→ 产品化；
-- v2.0 再拆 `app.c`、`app_config_t`、多客户端/鉴权/HTTPS。
+- 线程化（本地预览 + 推流同时，先测 libjpeg-turbo 编解码开销）；
+- 拆 `app.c` / `display.c`，`main.c` 只做编排；
+- 单元测试（`yuyv`、`config`、`autolight` 都能脱硬件测）；
+- Buildroot 精简 + 开机自启 + 看门狗；
+- 再往后的多客户端/鉴权/HTTPS。
 
 ---
 
@@ -478,13 +533,14 @@ tail -f soak/soak_*.log
 - 不要在未确认实际分辨率时假设 1024×600；
 - 不要把 `camera.log`、`soak/`、`images/`、`*.dts`、`.ko` 提交进仓库；
 - 改完内核模块一定要 `rmmod` 再 `insmod`；
-- 不要在没有确认光感硬件的情况下硬写 I2C 驱动。
+- 不要把亮度阈值、迟滞这些策略写进驱动，驱动只搬数据；
+- 不要把 IIO 设备号（`iio:device0`）写死，按 `name` 找。
 
 ---
 
 ## 12. 新会话检查清单
 
-1. 读本文 + `docs/handoff-prompt.md`；
+1. 读本文；
 2. `git status` / `git log --oneline -5` / `git tag -l`；
 3. 读 `docs/driver.md`、`docs/architecture.md`、`docs/board.md`、`docs/roadmap.md`；
 4. 确认 `camera.ini` 的 `format=YUYV`；
@@ -492,7 +548,8 @@ tail -f soak/soak_*.log
 6. 构建用户态，上板跑 30 秒，确认 15fps、`DQbuf == Qbuf == Frames`、无 ERROR；
 7. 确认 `lsmod | grep button`、`dmesg | grep button` 有两行；
 8. 按 KEY1/KEY2，确认拍照/切分辨率；
-9. 再开始 I2C/亮度或 v2.0。
+9. `insmod ap3216c.ko`，确认 `in_illuminance_input` 有值、遮住会降；
+10. 再开始产品侧（锁定屏/设置菜单）或 v2.0。
 
 ---
 
@@ -502,8 +559,7 @@ tail -f soak/soak_*.log
 |---|---|
 | `README.md` | 对外入口、构建/运行、功能表 |
 | `docs/handoff.md` | 本文 |
-| `docs/handoff-prompt.md` | 给新模型的启动提示词 |
-| `docs/driver.md` | W8–W9 驱动：hello_misc、button_plat、DTS、I2C 计划 |
+| `docs/driver.md` | W8–W9 驱动：hello_misc、button_plat、ap3216c、DTS、IIO |
 | `docs/architecture.md` | 模块、数据流、技术债 |
 | `docs/board.md` | 板子、网络、部署、gdb、长跑 |
 | `docs/roadmap.md` | 版本计划、memo 产品想法、backlog |
@@ -516,5 +572,5 @@ tail -f soak/soak_*.log
 
 ## 14. 最后一句
 
-> **v1.5 已经能演示；现在是把按键、光感这些硬件用自写驱动接进来。
-> 先让 KEY1/KEY2 稳定，再谈 I2C 和亮度，最后才是 v2.0 的重构。**
+> **v1.5 已经能演示；按键、背光、光感都用自写驱动接进来了。
+> 接下来是产品侧（锁定屏、设置菜单），最后才是 v2.0 的重构。**

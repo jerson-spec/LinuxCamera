@@ -2,7 +2,7 @@
 
 基于 i.MX6ULL + Linux V4L2 的相机项目。
 
-> **当前状态：v1.5（能联网看）+ W8–W9 驱动进行中**
+> **当前状态：v1.5（能联网看）+ W8–W9 驱动基本完成**
 >
 > 已实现：
 > - V4L2 MMAP 采集、格式/分辨率枚举、MJPEG 保存 JPEG
@@ -16,14 +16,17 @@
 > - 8 小时长跑：610390 帧、0 错误、内存和 fd 都不增长（v1.0）
 > - **HTTP：`/` 首页、`/snapshot.jpg` 单张、`/stream` MJPEG 连续流（v1.5）**
 > - **1 小时网页推流：RSS/fd 不增长，延迟约 280–310 ms（v1.5）**
-> - **自写内核驱动：`hello_misc`（字符设备/poll）、`button_plat`（platform + input，按键拍照/切分辨率）（W8–W9）**
+> - **自写内核驱动：`hello_misc`（字符设备/poll）、`button_plat`（platform + input）、
+>   `ap3216c`（I2C 光感 + IIO）（W8–W9）**
+> - **背光调节：上下滑屏幕加减亮度**
+> - **自动亮度：环境光暗则屏暗，亮则屏亮**
 >
 > 尚未实现：
 > - 缩放（放大/缩小）
 > - 本地预览和网页推流同时进行（摄像头同一时刻只能一种格式）
+> - 锁定触摸屏、OSD 设置菜单
 > - 多客户端、鉴权、HTTPS（v2.0）
 > - 开机自启 / 看门狗 / Buildroot 精简（v2.0）
-> - I2C 光感/自动亮度（硬件待确认）
 >
 
 ---
@@ -78,7 +81,11 @@
 | 字符设备 `hello_misc`（read/write/ioctl/poll） | ✅ W8–W9 已验证 |
 | platform + input 按键驱动 `button_plat` | ✅ W8–W9 已验证 |
 | 按键拍照（KEY1）/ 切分辨率（KEY2） | ✅ 已验证 |
-| I2C 光感 / 自动亮度 | ❌ 硬件待确认 |
+| 背光调节（sysfs，按档） | ✅ 已验证 |
+| 上下滑调亮度（触摸手势） | ✅ 已验证 |
+| I2C 光感 `ap3216c`（IIO 通道） | ✅ W8–W9 已验证 |
+| 自动亮度（环境光 → 屏亮度） | ✅ 已验证 |
+| 锁定触摸屏 / OSD 设置菜单 | ❌ 未实现 |
 | 缩放（放大/缩小） | ❌ 未实现 |
 | 本地预览 + 网页推流同时 | ❌ 摄像头同一时刻只能一种格式 |
 | 多客户端 / 鉴权 / HTTPS | ❌ v2.0 |
@@ -143,11 +150,37 @@
 | dropped | 41 帧（0.0067%） |
 | 收尾 | DQbuf = Qbuf = Frames = 610390 |
 
-结论：多分辨率、letterbox、触摸拍照、JPEG 存卡、OSD、8 小时稳定，v1.0 的验收项全部达成。
+结论：多分辨率、letterbox、触摸拍照、JPEG 存卡、OSD、8 小时稳定，v1.0 的验收项全部达标。
+
+已验证（W8–W9，驱动接入，2026-11-26）：
+
+- 按键：KEY1 拍照、KEY2 切分辨率，`dmesg` 两行 probe 信息；
+- 背光：`max_brightness = 8`，上下滑一次走一档，OSD 显示百分比；
+- 光感：AP3216C 在 `i2c-0` 的 `0x1e`，实测全黑 0、室内 80–90、手电约 1000；
+- 自动亮度：遮住约 1.5 秒降到最低档，松手回到 75%，手电到 100%；
+- 驱动加载后 `i2cget` 报 `EBUSY`，`rmmod` 后应用自动退回直读。
+
+结论：硬件控制闭环（按键 + 背光 + 光感）打通，画面帧率不受影响。
 
 ---
 
 ## 数据流
+
+### 环境光 → 屏幕亮度（W8–W9）
+
+```text
+AP3216C(0x1e)
+   │  I2C
+   ├── 无驱动：/dev/i2c-0 直读 0x0C/0x0D ── ALS*0.35 ──┐
+   └── 有驱动：ap3216c.ko → IIO → in_illuminance_input ─┤
+                                                       ▼
+                                              autolight（200ms 采样）
+                                                       │ 阈值 + 迟滞
+                                                       ▼
+                                        backlight → /sys/class/backlight/.../brightness
+```
+
+触摸上下滑直接调档，会暂停自动调整 30 秒。
 
 ### 采集/保存
 
@@ -236,21 +269,27 @@ LinuxCamera/
 │   ├── lcd.ini
 │   └── trans.ini
 ├── include/
+│   ├── autolight.h
+│   ├── backlight.h
 │   ├── camera.h
 │   ├── config.h
 │   ├── http.h
 │   ├── lcd.h
 │   ├── log.h
+│   ├── lux.h
 │   ├── osd.h
 │   ├── snapshot.h
 │   ├── touch.h
 │   └── yuyv.h
 ├── src/
+│   ├── autolight.c
+│   ├── backlight.c
 │   ├── camera.c
 │   ├── config.c
 │   ├── http.c
 │   ├── lcd.c
 │   ├── log.c
+│   ├── lux.c
 │   ├── osd.c
 │   ├── touch.c
 │   ├── yuyv.c
@@ -262,16 +301,22 @@ LinuxCamera/
 │   │   ├── Makefile
 │   │   ├── README.md
 │   │   └── test_hello.c
-│   └── button_plat/
-│       ├── button_plat.c
+│   ├── button_plat/
+│   │   ├── button_plat.c
+│   │   ├── Makefile
+│   │   └── lc_button.patch
+│   └── ap3216c/
+│       ├── ap3216c.c
 │       ├── Makefile
-│       └── lc_button.patch
+│       ├── ap3216c.patch
+│       └── README.md
 ├── tests/
 │   ├── manual/
 │   │   ├── test_Get_images.c
 │   │   ├── test_Draw_region.c
 │   │   ├── test_Trans_YUYV.c
-│   │   └── test_camera_preview.c
+│   │   ├── test_camera_preview.c
+│   │   └── test_lux.c
 │   └── unit/
 │       └── config_test.c
 ├── third_party/
@@ -282,7 +327,6 @@ LinuxCamera/
 │   ├── driver.md
 │   ├── roadmap.md
 │   ├── handoff.md
-│   ├── handoff-prompt.md
 │   ├── release-v1.0.md
 │   ├── release-v1.5.md
 │   ├── debug-log.md
@@ -764,8 +808,10 @@ p lcd_var_screeninfo_t
 14. iOS Safari 不支持 MJPEG 流，只能看单张；
 15. 按键驱动假设 `button-gpios` 正好两个 GPIO；`gpio-keys` 必须 disabled；
 16. 改完内核模块必须 `rmmod` 再 `insmod`，否则跑的是旧 `.ko`；
-17. 主循环里还有一条 `poll revents mismatch` 的 WARN，是按键/触摸唤醒 poll 时的噪音；
-18. 没有缩放、没有单元测试/CI；I2C 光感硬件待确认。
+17. `poll revents mismatch` 的 WARN 已经注释掉，日志里不该再出现；
+18. 光感驱动占了 `i2c-0` 的 `0x1e` 后，`i2cget` 会报 `EBUSY`，属正常；
+19. 自动亮度上电有 1 秒宽限，手动滑动后 30 秒内不自动调；
+20. 没有缩放、没有单元测试/CI；锁定屏和设置菜单还没做。
 
 ---
 
@@ -812,15 +858,16 @@ p lcd_var_screeninfo_t
 - [x] 开关标签页 10 次稳定
 - [x] 1 小时推流：RSS/fd 不增长，dropped 8/26856
 
-### W8–W9 驱动（进行中）
+### W8–W9 驱动（基本完成）
 
 - [x] `hello_misc`：misc 字符设备 + read/write/ioctl/poll/等待队列
 - [x] `button_plat`：platform + input，KEY1=KEY_F1 拍照、KEY2=KEY_F2 切分辨率
 - [x] 设备树补丁 `driver/button_plat/lc_button.patch`
 - [x] 应用按名字找 `lc-button`，按键已接入主循环
-- [ ] I2C 光感（先 `i2cdetect` 确认硬件）
-- [ ] 背光/自动亮度（`/sys/class/backlight`）
-- [ ] 更深的 input/I2C 练习（按产品需要）
+- [x] 背光模块（sysfs，按档）+ 上下滑调亮度
+- [x] `ap3216c`：I2C 光感 + IIO，`in_illuminance_input`
+- [x] 自动亮度（阈值、迟滞、手动优先）
+- [ ] 锁定触摸屏、OSD 设置菜单（产品侧，下一步）
 
 ### v2.0
 
@@ -835,12 +882,13 @@ p lcd_var_screeninfo_t
 
 ## 版本
 
-当前 `v1.5`（已打标签），W8–W9 驱动进行中：
+当前 `v1.5`（已打标签），W8–W9 驱动基本完成：
 
 - 能演示：LCD 实时预览、触摸/按键拍照、分辨率轮换、OSD；浏览器打开
   `http://板子IP:8888/` 看连续画面、点“拍一张”；
-- 能演示：自写 `hello_misc` 字符设备和 `button_plat` platform/input 按键驱动；
-- 不能做：本地预览和网页推流同时、多客户端、缩放、开机自启；
+- 能演示：上下滑调亮度、遮住光感屏幕变暗、手电照变亮；
+- 能演示：自写 `hello_misc` 字符设备、`button_plat` 按键驱动、`ap3216c` 光感驱动；
+- 不能做：本地预览和网页推流同时、多客户端、缩放、开机自启、锁定屏/设置菜单；
 - 已知问题：见上面「已知限制」；
 - 构建/运行：见「构建」「运行」两节；
 - 数据：8 小时长跑见 `docs/performance.md` 的 2026-11-14 一节，

@@ -19,19 +19,19 @@ W5 拍照存卡        ✅ 完成（MJPEG 直存 jpg）
 v1.0               ✅ 完成（8 h / 610390 帧 / 0 错误）
 W6 网络推流        ✅ 完成（/snapshot + /stream + 首页）
 v1.5               ✅ 完成并打标签（v1.5）
-W8–W9 驱动         🔄 进行中（hello_misc、button_plat 完成；I2C 未做）
+W8–W9 驱动         ✅ 基本完成（hello_misc、button_plat、ap3216c + 自动亮度）
 W11 Buildroot      ❌ 之后
 ```
 
 当前状态一句话：
 
 > **v1.5 已经能演示：LCD 预览、触摸/按键拍照、切分辨率、浏览器看 MJPEG 流；
-> 驱动做完了字符设备、poll、platform + input，下一步是 I2C/亮度。**
+> 驱动做完了字符设备、poll、platform + input、I2C 光感，屏幕能跟着环境光自己调亮度。**
 
 当前功能对应：
 
 ```text
-v1.5 + W8–W9（进行中）
+v1.5 + W8–W9（基本完成）
 ```
 
 ---
@@ -149,15 +149,15 @@ D:\Desktop\deepseek_harness_project\嵌入式Linux学习规划-相机主线.md
 | W5 | libjpeg、存卡 | ✅ 完成（MJPEG 直存，不需要 libjpeg） |
 | W6 | HTTP MJPEG | ✅ 完成（`/snapshot.jpg` + `/stream` + 首页） |
 | W7 | 重构/测试/文档 | 🟡 文档已补，测试未做 |
-| W8–W9 | I2C/Input 驱动 | 🔄 字符设备/poll + platform/input 完成；I2C 未做 |
+| W8–W9 | I2C/Input 驱动 | ✅ 字符设备/poll + platform/input + I2C 光感（IIO）+ 自动亮度 |
 | W10 | V4L2 深入 | 🟡 枚举/格式有实践 |
 | W11 | Buildroot/自启/看门狗 | ❌ 未开始 |
 | W12 | 性能/README/演示 | 🟡 README 已更新，8h + 1h 推流数据已有 |
 
 结论：
 
-> **W0–W6 完成，v1.5 已打标签；W8–W9 做了一半（字符设备、poll、platform、input），
-> 下一步 I2C/亮度。**
+> **W0–W6 完成，v1.5 已打标签；W8–W9 的四块（字符设备、poll、platform/input、
+> I2C 光感）都跑通了，剩下的是产品侧：设置菜单、相册、v2.0。**
 
 ---
 
@@ -246,17 +246,24 @@ display_ms
 
 ---
 
-## 6. 下一步：W8–W9 驱动
+## 6. W8–W9 驱动（已完成）
 
-v1.5 已完成，网络这块先收住。下一步转驱动：
+四块都做完了：
 
-- 字符设备：misc + 设备树节点，实现 `open/read/write/ioctl`；
-- poll/等待队列：让用户态 `poll` 能等到数据；
-- input 子系统：按键或 GPIO 做成 input 设备，`evtest` 能看到事件；
-- I2C/regmap：读一个传感器或 EEPROM；
-- 有余力再看 UVC/V4L2 内核代码，理解 `REQBUFS/QBUF/DQBUF` 在内核里做了什么。
+- 字符设备：`hello_misc`，misc + 设备树节点，`open/read/write/ioctl`；
+- poll / 等待队列：等待条件写成 `hello_len > *ppos`，用户态 `poll` 能等到数据；
+- input 子系统：`button_plat`，两个 GPIO、两个键，`KEY_F1` 拍照、`KEY_F2` 切分辨率；
+- I2C：`ap3216c`，先用户态直读确认寄存器和换算，再写 `i2c_driver` + IIO。
 
-多客户端、鉴权、本地预览+推流同时，都放到 v2.0。
+顺带把背光（`/sys/class/backlight`）和自动亮度策略（`autolight.c`）做完了。
+
+下一步不是驱动了，是产品侧：
+
+- 锁定触摸屏（防误触）；
+- OSD 设置菜单（亮度、熄屏、governor）；
+- 然后才是 v2.0 的重构。
+
+多客户端、鉴权、本地预览+推流同时，仍然放在 v2.0。
 
 ---
 
@@ -271,6 +278,7 @@ v1.5 已完成，网络这块先收住。下一步转驱动：
 | 触摸驱动范围报错 | 坐标偏 | 已用 `touch_set_range()` 覆盖 |
 | 切到 800×600 固定 1.7 s | 操作有停顿 | 可接受；要快就只切小分辨率 |
 | 网络第一次做 | 协议/并发容易乱 | 已用单客户端 + 300ms 空连接超时收住 |
+| 屏幕背光抬高光感读数 | 越调越亮的正反馈 | 迟滞 + 连续 3 次去抖；真出现就把自动上限降到 90% |
 | 推流时本地预览暂停 | 不能双端同时看 | 摄像头只有一种格式；要双端先测 libjpeg-turbo |
 | iOS Safari 不支持 MJPEG 流 | 苹果手机看不了 | 用 `/snapshot.jpg` 或后续做 HLS/WebRTC |
 
@@ -293,7 +301,7 @@ v1.5 已完成，网络这块先收住。下一步转驱动：
 ## 9. 一句话
 
 > **v1.5 已经能演示：LCD 预览、触摸/按键拍照、切分辨率、浏览器看 MJPEG 流（约 300ms）；
-> 驱动做完字符设备/poll/platform/input，下一步 I2C 和亮度。**
+> 驱动四块（字符设备、poll、platform/input、I2C 光感）都跑通了，屏幕会跟着环境光调亮度。**
 
 ---
 
@@ -320,14 +328,17 @@ v1.5 已完成，网络这块先收住。下一步转驱动：
 
 **时机**：v1.5 发布、W8–W9 驱动基本盘之后；不要插在驱动学习中间。
 
-### 产品 M1 进度（2026-11-23）
+### 产品 M1 进度（2026-11-26）
 
 M1 是“硬件控制闭环”，拆开看：
 
 - [x] 板载按键：KEY1 拍照、KEY2 切分辨率（`button_plat` + input）；
-- [ ] 光感自动亮度：先 `i2cdetect -y 1` 确认硬件；
-- [ ] 上滑/下滑调亮度：先确认 `/sys/class/backlight`；
+- [x] 背光：`/sys/class/backlight/backlight/`，`max_brightness = 8`；
+- [x] 上滑/下滑调亮度（`touch` 手势 + `backlight` 模块）；
+- [x] 光感自动亮度：AP3216C 走 `i2c-0` 的 `0x1e`，驱动 + 两条后端；
+- [ ] 锁定触摸屏（防止误触拍照/切分辨率）；
 - [ ] OSD 设置菜单：亮度、熄屏、governor；
 - [ ] 相册/Web 管理：M3。
 
-按键已经完成，接下来优先确认光感和背光，不要先做双端同时。
+M1 还差“设置菜单”和一个小功能（锁定屏）。双端同时仍然排在 v2.0，
+不要因为 M1 快收尾了就去动线程。
