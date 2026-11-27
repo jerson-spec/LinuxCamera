@@ -336,7 +336,7 @@ M1 是“硬件控制闭环”，拆开看：
 - [x] 背光：`/sys/class/backlight/backlight/`，`max_brightness = 8`；
 - [x] 上滑/下滑调亮度（`touch` 手势 + `backlight` 模块）；
 - [x] 光感自动亮度：AP3216C 走 `i2c-0` 的 `0x1e`，驱动 + 两条后端；
-- [ ] 锁定触摸屏（防止误触拍照/切分辨率）；
+- [x] 锁定触摸屏（防止误触拍照/切分辨率）；
 - [ ] OSD 设置菜单：亮度、熄屏、governor；
 - [ ] 相册/Web 管理：M3。
 

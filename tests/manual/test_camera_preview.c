@@ -38,6 +38,8 @@ static volatile sig_atomic_t g_save = 0;
 static volatile sig_atomic_t g_res = 0;
 /* 修改：上下滑的亮度增减，+1 加一档，-1 减一档 */
 static volatile sig_atomic_t g_bright = 0;
+/* 修改：触摸屏锁定状态，1 = 已上锁，点击只认图标 */
+static int g_locked = 0;
 
 typedef struct {
 	unsigned int width;
@@ -404,6 +406,50 @@ static void handle_buttons(int fd)
 }
 
 /*
+ * 修改：锁定图标。
+ * 画在屏幕右侧黑边（x 912..1023）里，800×600 / 640×480 / 352×288
+ * 三种分辨率下画面都盖不到这块，所以图标永远不会挡住预览。
+ *
+ * 上锁：闭合锁梁 + 红色 + "LOCK"
+ * 解锁：开口锁梁 + 绿色 + "OPEN"
+ */
+#define LOCK_ICON_X	944
+#define LOCK_ICON_Y	8
+#define LOCK_ICON_W	64
+#define LOCK_ICON_H	80
+
+static int lock_icon_hit(int x, int y)
+{
+	return x >= LOCK_ICON_X && x < LOCK_ICON_X + LOCK_ICON_W &&
+	       y >= LOCK_ICON_Y && y < LOCK_ICON_Y + LOCK_ICON_H;
+}
+
+static void lock_icon_draw(int locked)
+{
+	unsigned int color = locked ? 0x00FF4040 : 0x0040FF40;
+
+	/* 底板：黑边上给个稍亮的方块，看得出这里能点 */
+	osd_show_rect(LOCK_ICON_X, LOCK_ICON_Y, LOCK_ICON_W, LOCK_ICON_H,
+	              0x00282828);
+
+	/* 锁梁：左竖 + 顶横固定，右竖在上锁时闭合、解锁时只画一截 */
+	osd_show_rect(LOCK_ICON_X + 20, LOCK_ICON_Y + 18, 6, 20, color);
+	osd_show_rect(LOCK_ICON_X + 20, LOCK_ICON_Y + 18, 24, 6, color);
+	if (locked)
+		osd_show_rect(LOCK_ICON_X + 38, LOCK_ICON_Y + 18, 6, 20, color);
+	else
+		osd_show_rect(LOCK_ICON_X + 38, LOCK_ICON_Y + 18, 6, 8, color);
+
+	/* 锁体 */
+	osd_show_rect(LOCK_ICON_X + 16, LOCK_ICON_Y + 36, 32, 24, color);
+
+	/* 文字压在锁体下面，两个字都是 4 字符，居中 */
+	osd_show_text_shadow(LOCK_ICON_X + 16, LOCK_ICON_Y + 62,
+	                     (const unsigned char *)(locked ? "LOCK" : "OPEN"),
+	                     color, 0x00000000);
+}
+
+/*
  *	./test_camera_preview [path/camera.ini] [path/lcd.ini]
  */
 int main(int argc, char **argv)
@@ -723,10 +769,22 @@ int main(int argc, char **argv)
 					g_bright = -1;
 				} else {
 					LOG_INFO("tap: %d,%d", tx, ty);
-					if (tx > (int)lcd_var_screeninfo.xres / 2)
+
+					/*
+					 * 修改：先判是不是点在锁图标上；上锁后左右分区失效，
+					 * 但滑动亮度、KEY1/KEY2、HTTP 都不受影响。
+					 */
+					if (lock_icon_hit(tx, ty)) {
+						g_locked = !g_locked;
+						LOG_INFO("screen %s",
+						         g_locked ? "locked" : "unlocked");
+					} else if (g_locked) {
+						LOG_INFO("locked, tap ignored");
+					} else if (tx > (int)lcd_var_screeninfo.xres / 2) {
 						g_res = 1;
-					else
+					} else {
 						g_save = 1;
+					}
 				}
 			}
 		}		
@@ -965,8 +1023,13 @@ int main(int argc, char **argv)
 		osd_show_text_shadow(lb.x_offset + 8, lb.y_offset + 8 + 18,
 		                     (const unsigned char *)line, 0x00FFFFFF, 0x00000000);		
 
-		/* 修改：把滑动的提示补上 */
-		snprintf(line, sizeof(line), "tap L: shot / tap R: res / swipe: bright");
+		/* 修改：上锁时把提示换成解锁方式，避免以为程序卡死 */
+		if (g_locked)
+			snprintf(line, sizeof(line),
+			         "LOCKED: tap icon to unlock / swipe: bright");
+		else
+			snprintf(line, sizeof(line),
+			         "tap L: shot / tap R: res / swipe: bright");
 		osd_show_text_shadow(lb.x_offset + 8, lb.y_offset + 8 + 36,
 		                     (const unsigned char *)line, 0x00FFFFFF, 0x00000000);		
 		#else	//无阴影
@@ -978,6 +1041,9 @@ int main(int argc, char **argv)
 			LOG_ERROR("osd_show_text failed");
 		#endif
 		
+		/* 修改：锁图标每帧重画，右侧黑边里，不挡画面 */
+		lock_icon_draw(g_locked);
+
 		/* 双缓冲切页 */
 		if (lcd_doublebuffering_on() && lcd_flip() < 0)
 			LOG_ERROR("lcd_flip failed, single buffer fallback");
